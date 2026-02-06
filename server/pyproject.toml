@@ -1,0 +1,16 @@
+[project]
+name = "google-ai-scraper"
+version = "0.1.0"
+description = "Scrape Google AI Overviews via Chrome extension relay"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

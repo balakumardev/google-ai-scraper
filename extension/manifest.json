@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Google AI Overview Scraper",
+  "version": "1.0",
+  "description": "Scrapes Google AI Overviews and relays them to a local server",
+  "permissions": ["tabs"],
+  "host_permissions": [
+    "https://www.google.com/*",
+    "http://localhost:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.google.com/search*"],
+      "js": ["lib/turndown.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
