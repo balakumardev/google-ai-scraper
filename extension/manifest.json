@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Google AI Overview Scraper",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Scrapes Google AI Overviews and relays them to a local server",
-  "permissions": ["tabs"],
+  "permissions": ["tabs", "scripting"],
   "host_permissions": [
     "https://www.google.com/*",
     "http://localhost:8000/*"

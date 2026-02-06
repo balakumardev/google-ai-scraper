@@ -17,6 +17,8 @@ User ← JSON response ← FastAPI Server (returns)
 
 Each query gets a UUID. Fully parallel — concurrent queries each get their own tab.
 
+Supports **conversational follow-ups** via thread IDs. First query creates a thread with a persistent tab; follow-ups reuse that tab by typing into Google's in-page follow-up textbox.
+
 ## Project Structure
 
 ```
@@ -34,18 +36,25 @@ extension/
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/ask?q={query}` | GET | Main API. Holds connection up to 30s via asyncio.Event. Returns `{query, query_id, markdown, citations}` or 504 |
-| `/pending` | GET | Extension polls this. Pops oldest query from FIFO deque |
+| `/ask?q={query}&thread_id={id}` | GET | Main API. Returns `{query, query_id, thread_id, markdown, citations}`. Optional `thread_id` for follow-ups (404 if expired, 409 if busy) |
+| `/pending` | GET | Extension polls this. Returns `{query_id, query, thread_id, type, close_threads}` |
 | `/result/{query_id}` | POST | Extension posts scraped result. Body: `{markdown, citations, error}` |
-| `/health` | GET | Status with pending/queued counts |
+| `/thread/{thread_id}` | DELETE | Close a thread and its tab. Extension picks up closure on next poll |
+| `/health` | GET | Status with pending/queued/active_threads counts |
 
 ## Extension Details
 
 ### background.js
 - Polls `GET /pending` every 1.5s (recursive setTimeout keeps service worker alive)
 - Creates tabs with `chrome.tabs.create({url, active: false})`
-- Tracks active tabs in `Map<tabId, {queryId, timeoutId}>`
+- Tracks active tabs in `Map<tabId, {queryId, threadId, timeoutId}>`
+- Tracks thread-to-tab mapping in `Map<threadId, tabId>` (threadTabs)
 - 28s timeout per tab (2s less than server's 30s) as safety net
+- **New queries:** Create tab, store in both maps
+- **Follow-ups:** Look up tab from `threadTabs`, send `FOLLOW_UP_QUERY` message to content script
+- **Tab lifecycle:** Tabs stay alive after result (for follow-ups). Closed via `close_threads` from server (TTL expiry or explicit DELETE)
+- Processes `close_threads` array from `/pending` response — closes tabs for expired/deleted threads
+- `chrome.tabs.onRemoved` listener cleans up both maps when tab is closed externally
 - Listens for `chrome.runtime.onMessage` from content scripts, relays via `POST /result/{queryId}`
 
 ### content.js
@@ -63,9 +72,16 @@ extension/
   - Keeps only first heading removed (query title), preserves section headings
   - Turndown rules: `[role="heading"]` → `### markdown`, data: images skipped, Google redirects unwrapped
 - **Citations:** From full `[data-subtree="aimc"]` container. Filters internal Google links, `policies.google.com`, empty/short hrefs, strips `#:~:text=` fragments, deduplicates
+- **Follow-up handling:** `chrome.runtime.onMessage` listener for `FOLLOW_UP_QUERY` messages
+  - Finds `div[role="textbox"][contenteditable="true"]` (Google's follow-up input)
+  - Falls back to clicking expand buttons matching `/follow.?up|ask.+question|show\s*more|ask\s*a/i`
+  - Types via `document.execCommand("insertText")` for proper contenteditable event firing
+  - Submits via nearby button or Enter keydown
+  - Delta extraction: snapshots child count before submit, extracts only new children after stability
+  - `followUpInProgress` flag prevents concurrent follow-ups at content script level
 
 ### manifest.json
-- Permissions: `tabs`
+- Permissions: `tabs`, `scripting`
 - Host permissions: `google.com`, `localhost:8000`
 - Content scripts inject `turndown.js` + `content.js` on `google.com/search*` at `document_idle`
 
@@ -81,6 +97,12 @@ cd server && uv run uvicorn main:app --port 8000
 # Test
 curl -s "http://localhost:8000/health"
 curl -s "http://localhost:8000/ask?q=what+is+photosynthesis" | python3 -m json.tool
+
+# Follow-up using thread_id from previous response
+curl -s "http://localhost:8000/ask?q=how+does+it+work+in+plants&thread_id=THREAD_ID" | python3 -m json.tool
+
+# Close a thread
+curl -s -X DELETE "http://localhost:8000/thread/THREAD_ID"
 ```
 
 ## Key Design Decisions
@@ -90,6 +112,9 @@ curl -s "http://localhost:8000/ask?q=what+is+photosynthesis" | python3 -m json.t
 - **`udm=50`** parameter forces Google's AI Overview mode
 - **Background tabs** (`active: false`) avoid stealing browser focus
 - **Turndown.js** bundled locally (not CDN) since extensions can't load remote scripts in MV3
+- **Thread lifecycle:** Tabs persist after first result for follow-ups. Server auto-expires threads after 2 min inactivity (THREAD_TTL=120s). Extension closes tabs when server signals via `close_threads`
+- **Busy flag** on threads prevents concurrent follow-ups (409 Conflict)
+- **Delta extraction** for follow-ups: snapshots wrapper child count before submission, extracts only new content blocks
 
 ## Error Scenarios
 
@@ -100,6 +125,11 @@ curl -s "http://localhost:8000/ask?q=what+is+photosynthesis" | python3 -m json.t
 | No AI Overview on page | 200 with `error: "no_ai_overview"`, empty markdown |
 | Tab timeout (28s) | Returns `error: "tab_timeout"` |
 | Google changes DOM | Container detection has 3 fallback strategies — may need updating |
+| Thread expired | Follow-up returns 404. Client should start a new thread |
+| Thread busy | Concurrent follow-up returns 409. Wait for current query to finish |
+| Follow-up textbox not found | `error: "follow_up_textbox_not_found"`. Google may have changed DOM or no follow-up available |
+| Thread tab crashed | `error: "thread_tab_crashed"`. Tab was closed/crashed. Start new thread |
+| Content script unreachable | `error: "content_script_unreachable"`. Content script may have been unloaded |
 
 ## Changing Server Port
 
