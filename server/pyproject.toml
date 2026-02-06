@@ -6,10 +6,18 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn>=0.32.0",
+    "mcp>=1.0.0",
+    "httpx>=0.28.0",
 ]
 
+[project.scripts]
+google-ai-mcp = "mcp_server.server:main"
+
+[tool.uv]
+package = true
+
 [tool.hatch.build.targets.wheel]
-packages = ["."]
+packages = [".", "mcp_server"]
 
 [build-system]
 requires = ["hatchling"]
