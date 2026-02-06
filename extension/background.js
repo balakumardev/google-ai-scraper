@@ -1,11 +1,46 @@
 const SERVER = "http://localhost:8000";
 const POLL_INTERVAL = 1500;
 const TAB_TIMEOUT = 28000;
+const ALARM_NAME = "poll-server";
 
 // Map<tabId, {queryId, threadId, timeoutId}>
 const activeTabs = new Map();
-// Map<threadId, tabId>
-const threadTabs = new Map();
+// Map<threadId, tabId> — also persisted to chrome.storage.session
+let threadTabs = new Map();
+
+// --- Persistence for threadTabs ---
+// Service workers can restart at any time (MV3). Persist threadTabs so
+// close_threads from the server can still find the right tab after restart.
+
+async function saveThreadTabs() {
+  const obj = Object.fromEntries(threadTabs);
+  await chrome.storage.session.set({ threadTabs: obj });
+}
+
+async function loadThreadTabs() {
+  const data = await chrome.storage.session.get("threadTabs");
+  if (data.threadTabs) {
+    threadTabs = new Map(Object.entries(data.threadTabs));
+  }
+}
+
+// --- Polling via chrome.alarms (survives service worker inactivity) ---
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === ALARM_NAME) {
+    pollServer();
+  }
+});
+
+async function startPolling() {
+  await chrome.alarms.create(ALARM_NAME, {
+    delayInMinutes: 0,
+    periodInMinutes: POLL_INTERVAL / 60000,
+  });
+  // Also fire immediately (alarms have ~1min minimum in MV3,
+  // so we supplement with setTimeout for responsiveness)
+  pollServer();
+}
 
 async function pollServer() {
   try {
@@ -16,7 +51,7 @@ async function pollServer() {
       // Process thread closures first
       if (data.close_threads) {
         for (const threadId of data.close_threads) {
-          closeThread(threadId);
+          await closeThread(threadId);
         }
       }
 
@@ -33,6 +68,9 @@ async function pollServer() {
     // Server not running — silently retry next poll
   }
 
+  // Supplement alarm with setTimeout for sub-minute responsiveness.
+  // If the service worker stays alive, this fires at 1.5s intervals.
+  // If it goes idle, the alarm wakes it back up (at ~1min intervals).
   setTimeout(pollServer, POLL_INTERVAL);
 }
 
@@ -50,6 +88,7 @@ async function handleNewQuery(data) {
     timeoutId,
   });
   threadTabs.set(data.thread_id, tab.id);
+  await saveThreadTabs();
 }
 
 async function handleFollowUp(data) {
@@ -69,6 +108,7 @@ async function handleFollowUp(data) {
     await chrome.tabs.get(tabId);
   } catch {
     threadTabs.delete(data.thread_id);
+    await saveThreadTabs();
     await postResult(data.query_id, {
       markdown: "",
       citations: [],
@@ -120,6 +160,7 @@ async function handleTimeout(tabId, queryId, threadId, isFollowUp) {
   if (!isFollowUp) {
     // New query timeout: clean up tab and thread mapping
     threadTabs.delete(threadId);
+    await saveThreadTabs();
     try {
       await chrome.tabs.remove(tabId);
     } catch {
@@ -137,16 +178,21 @@ async function postResult(queryId, data) {
   });
 }
 
-function closeThread(threadId) {
+async function closeThread(threadId) {
   const tabId = threadTabs.get(threadId);
   threadTabs.delete(threadId);
+  await saveThreadTabs();
   if (tabId) {
     const entry = activeTabs.get(tabId);
     if (entry) {
       clearTimeout(entry.timeoutId);
       activeTabs.delete(tabId);
     }
-    chrome.tabs.remove(tabId).catch(() => {});
+    try {
+      await chrome.tabs.remove(tabId);
+    } catch {
+      // Tab may already be closed
+    }
   }
 }
 
@@ -173,8 +219,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     clearTimeout(entry.timeoutId);
     activeTabs.delete(tabId);
     threadTabs.delete(entry.threadId);
+    saveThreadTabs();
   }
 });
 
-// Start polling
-pollServer();
+// Initialize: load persisted state, then start polling
+loadThreadTabs().then(() => startPolling());

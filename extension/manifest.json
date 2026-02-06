@@ -3,7 +3,7 @@
   "name": "Google AI Overview Scraper",
   "version": "1.1",
   "description": "Scrapes Google AI Overviews and relays them to a local server",
-  "permissions": ["tabs", "scripting"],
+  "permissions": ["tabs", "scripting", "alarms", "storage"],
   "host_permissions": [
     "https://www.google.com/*",
     "http://localhost:8000/*"
