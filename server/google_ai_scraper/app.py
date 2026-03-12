@@ -107,8 +107,17 @@ async def ask(q: str, thread_id: str | None = None, close_thread: bool = False):
         raise HTTPException(400, "query is required")
 
     # Fail fast if extension hasn't polled recently
-    if last_poll_time == 0 or (time.monotonic() - last_poll_time) > EXTENSION_STALE_THRESHOLD:
-        raise HTTPException(503, "extension not connected — start Chrome with the extension loaded")
+    if last_poll_time == 0:
+        raise HTTPException(
+            503,
+            "Browser extension not connected. Start Chrome, install the extension from the Chrome Web Store, and set the extension's server URL to this server. The extension must be polling for requests to work.",
+        )
+    poll_age = time.monotonic() - last_poll_time
+    if poll_age > EXTENSION_STALE_THRESHOLD:
+        raise HTTPException(
+            503,
+            f"Browser extension disconnected (no poll for {poll_age:.0f}s). Check that Chrome is running, the extension is enabled, and its server URL matches this server.",
+        )
 
     # Thread validation
     if thread_id:
