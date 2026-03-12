@@ -1,12 +1,27 @@
-const SERVER = "http://localhost:8000";
+const DEFAULT_SERVER = "http://localhost:15551";
 const POLL_INTERVAL = 1500;
 const TAB_TIMEOUT = 28000;
 const ALARM_NAME = "poll-server";
+
+let serverUrl = DEFAULT_SERVER;
 
 // Map<tabId, {queryId, threadId, timeoutId}>
 const activeTabs = new Map();
 // Map<threadId, tabId> — also persisted to chrome.storage.session
 let threadTabs = new Map();
+
+// --- Server URL from options ---
+
+async function loadServerUrl() {
+  const { serverUrl: url } = await chrome.storage.sync.get({ serverUrl: DEFAULT_SERVER });
+  serverUrl = url;
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "sync" && changes.serverUrl) {
+    serverUrl = changes.serverUrl.newValue || DEFAULT_SERVER;
+  }
+});
 
 // --- Persistence for threadTabs ---
 // Service workers can restart at any time (MV3). Persist threadTabs so
@@ -44,7 +59,7 @@ async function startPolling() {
 
 async function pollServer() {
   try {
-    const resp = await fetch(`${SERVER}/pending`);
+    const resp = await fetch(`${serverUrl}/pending`);
     if (resp.ok) {
       const data = await resp.json();
 
@@ -189,7 +204,7 @@ async function handleTimeout(tabId, queryId, threadId, isFollowUp) {
 }
 
 async function postResult(queryId, data) {
-  await fetch(`${SERVER}/result/${queryId}`, {
+  await fetch(`${serverUrl}/result/${queryId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
@@ -247,5 +262,5 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
-// Initialize: load persisted state, then start polling
-loadThreadTabs().then(() => startPolling());
+// Initialize: load persisted state + server URL, then start polling
+Promise.all([loadThreadTabs(), loadServerUrl()]).then(() => startPolling());

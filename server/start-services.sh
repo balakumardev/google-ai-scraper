@@ -12,14 +12,14 @@ trap cleanup EXIT
 
 # Start FastAPI server
 cd "$DIR"
-uv run uvicorn main:app --port 8000 &
+uv run uvicorn google_ai_scraper.app:app --port 15551 &
 FASTAPI_PID=$!
 
-# Start MCP SSE server
-uv run google-ai-mcp --sse &
+# Start MCP SSE server (--no-server since FastAPI runs separately above)
+uv run google-ai-scraper --sse --no-server &
 MCP_PID=$!
 
-echo "FastAPI (PID $FASTAPI_PID) on :8000, MCP SSE (PID $MCP_PID) on :8001"
+echo "FastAPI (PID $FASTAPI_PID) on :15551, MCP SSE (PID $MCP_PID) on :8001"
 
 # Wait for both — if either exits, cleanup trap fires and kills the other
 wait

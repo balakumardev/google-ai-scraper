@@ -5,7 +5,8 @@ import os
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-SERVER_URL = os.environ.get("GOOGLE_AI_SCRAPER_URL", "http://localhost:8000")
+DEFAULT_PORT = 15551
+SERVER_URL = os.environ.get("GOOGLE_AI_SCRAPER_URL", f"http://127.0.0.1:{DEFAULT_PORT}")
 REQUEST_TIMEOUT = 35.0
 
 mcp = FastMCP("google-ai-scraper", port=8001)
@@ -67,7 +68,26 @@ async def health() -> str:
 def main():
     parser = argparse.ArgumentParser(description="Google AI Scraper MCP Server")
     parser.add_argument("--sse", action="store_true", help="Run with SSE transport (default: stdio)")
+    parser.add_argument("--no-server", action="store_true", help="Don't start embedded FastAPI server")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"FastAPI server port (default: {DEFAULT_PORT})")
     args = parser.parse_args()
+
+    if not args.no_server:
+        import asyncio
+        import threading
+
+        import uvicorn
+
+        from google_ai_scraper.app import app as fastapi_app
+
+        def run_server():
+            asyncio.run(
+                uvicorn.Server(
+                    uvicorn.Config(fastapi_app, host="127.0.0.1", port=args.port, log_level="warning")
+                ).serve()
+            )
+
+        threading.Thread(target=run_server, daemon=True).start()
 
     if args.sse:
         mcp.run(transport="sse")

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 16px; min-width: 300px; }
+    label { display: block; font-weight: 500; margin-bottom: 6px; }
+    input { width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box; }
+    .actions { margin-top: 12px; display: flex; align-items: center; gap: 12px; }
+    button { padding: 6px 16px; background: #1a73e8; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+    button:hover { background: #1557b0; }
+    .status { font-size: 13px; color: #188038; }
+  </style>
+</head>
+<body>
+  <label for="serverUrl">Server URL</label>
+  <input type="url" id="serverUrl" placeholder="http://localhost:15551">
+  <div class="actions">
+    <button id="save">Save</button>
+    <span id="status" class="status"></span>
+  </div>
+  <script src="options.js"></script>
+</body>
+</html>

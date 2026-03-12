@@ -7,9 +7,9 @@ Scrapes Google AI Overviews via a Chrome extension relay — no browser focus st
 ```
 MCP Client (Claude Code, Cursor, etc.)
     ↕ stdio or SSE
-MCP Server (server/mcp_server/server.py)
-    ↕ httpx
-FastAPI Server (server/main.py, port 8000)
+MCP Server (server/google_ai_scraper/mcp_server/server.py)
+    ↕ httpx (embedded FastAPI on port 15551)
+FastAPI Server (server/google_ai_scraper/app.py)
     ↕ polling (1.5s)
 Chrome Extension Background Worker
     → creates background tab (active: false)
@@ -29,20 +29,24 @@ Supports **conversational follow-ups** via thread IDs. First query creates a thr
 
 ```
 server/
-  main.py              # FastAPI app (Python 3.13, uv)
-  mcp_server/
-    __init__.py
-    server.py          # MCP server — httpx client to FastAPI (3 tools: search, follow_up, health)
-  start-services.sh    # Launches FastAPI + MCP SSE together (used by LaunchAgent)
-  pyproject.toml       # fastapi + uvicorn + mcp + httpx deps
+  pyproject.toml           # Package metadata + deps (published to PyPI)
+  google_ai_scraper/       # Python package
+    __init__.py            # __version__ = "0.2.0"
+    app.py                 # FastAPI app
+    mcp_server/
+      __init__.py
+      server.py            # MCP server — embeds FastAPI, entry point for `uvx google-ai-scraper`
+  start-services.sh        # Launches FastAPI + MCP SSE together (used by LaunchAgent)
 extension/
-  manifest.json        # Manifest V3
-  background.js        # Service worker: polls server, manages tabs
-  content.js           # Scrapes AI Overview → Markdown (most complex file)
-  lib/turndown.js      # HTML→Markdown library (v7.2.0 from unpkg)
+  manifest.json            # Manifest V3
+  background.js            # Service worker: polls server, manages tabs
+  content.js               # Scrapes AI Overview → Markdown (most complex file)
+  options.html/js          # Settings page (server URL config)
+  icons/                   # Extension icons (16, 32, 48, 128px)
+  lib/turndown.js          # HTML→Markdown library (v7.2.0 from unpkg)
 ```
 
-## Server Endpoints (main.py)
+## Server Endpoints (app.py, default port 15551)
 
 | Endpoint | Method | Purpose |
 |---|---|---|
@@ -55,6 +59,7 @@ extension/
 ## Extension Details
 
 ### background.js
+- Server URL configurable via options page (default `http://localhost:15551`), cached in memory, refreshed on `chrome.storage.onChanged`
 - Polls `GET /pending` every 1.5s (recursive setTimeout keeps service worker alive)
 - Creates tabs with `chrome.tabs.create({url, active: false})`
 - Tracks active tabs in `Map<tabId, {queryId, threadId, timeoutId}>`
@@ -92,33 +97,46 @@ extension/
 - **Error handling:** `scrapeAndSend` wrapped in try/catch — sends `extraction_error` if Turndown or DOM extraction throws
 
 ### manifest.json
-- Permissions: `tabs`, `scripting`
-- Host permissions: `google.com`, `localhost:8000`
+- Permissions: `tabs`, `scripting`, `alarms`, `storage`
+- Host permissions: `google.com`, `localhost/*` (all ports, since port is configurable)
+- Options page for server URL configuration
 - Content scripts inject `turndown.js` + `content.js` on `google.com/search*` at `document_idle`
 
-## Running (Direct HTTP)
+## Running
+
+### Quick Start (PyPI — recommended)
+
+```bash
+# Install and run (starts FastAPI + MCP server in one process)
+uvx google-ai-scraper
+
+# Or with pip
+pip install google-ai-scraper && google-ai-scraper
+```
+
+### Development (Direct HTTP)
 
 ```bash
 # Start server
-cd server && uv run uvicorn main:app --port 8000
+cd server && uv run uvicorn google_ai_scraper.app:app --port 15551
 
 # Load extension
 # chrome://extensions → Developer Mode → Load unpacked → select extension/
 
 # Test
-curl -s "http://localhost:8000/health"
-curl -s "http://localhost:8000/ask?q=what+is+photosynthesis" | python3 -m json.tool
+curl -s "http://localhost:15551/health"
+curl -s "http://localhost:15551/ask?q=what+is+photosynthesis" | python3 -m json.tool
 
 # Follow-up using thread_id from previous response
-curl -s "http://localhost:8000/ask?q=how+does+it+work+in+plants&thread_id=THREAD_ID" | python3 -m json.tool
+curl -s "http://localhost:15551/ask?q=how+does+it+work+in+plants&thread_id=THREAD_ID" | python3 -m json.tool
 
 # Close a thread
-curl -s -X DELETE "http://localhost:8000/thread/THREAD_ID"
+curl -s -X DELETE "http://localhost:15551/thread/THREAD_ID"
 ```
 
 ## MCP Server
 
-The MCP server (`server/mcp_server/server.py`) is an httpx client that wraps the FastAPI endpoints as 3 MCP tools. It does NOT replace the FastAPI server — it requires it running alongside.
+The MCP server (`server/google_ai_scraper/mcp_server/server.py`) wraps the FastAPI endpoints as 3 MCP tools. By default it embeds the FastAPI server in a daemon thread (port 15551), so a single `uvx google-ai-scraper` starts everything.
 
 ### MCP Tools
 
@@ -128,35 +146,55 @@ The MCP server (`server/mcp_server/server.py`) is an httpx client that wraps the
 | `follow_up` | `query: str, thread_id: str` | Continue a conversation in an existing thread. |
 | `health` | none | Check server, extension connectivity, queue depth. |
 
-### Prerequisites (Required for Both Transports)
+### Prerequisites
 
-1. **Chrome** running with the extension loaded (chrome://extensions → Load unpacked → `extension/`)
-2. **FastAPI server** running on port 8000
+1. **Chrome** running with the extension loaded (chrome://extensions → Load unpacked → `extension/`, or install from Chrome Web Store)
 
 ### Setup
 
 ```bash
-cd server && uv sync
+# From PyPI (recommended)
+uvx google-ai-scraper
+
+# Or from source
+cd server && uv sync && uv run google-ai-scraper
 ```
 
-### Option A: Background Service (SSE) — Recommended
+### Option A: Stdio (Recommended for MCP clients)
+
+Single command starts FastAPI (port 15551) + MCP stdio. No separate server needed.
+
+**MCP client config (stdio):**
+
+Claude Code / Claude Desktop / Cursor:
+```json
+{
+  "mcpServers": {
+    "google-ai-scraper": {
+      "command": "uvx",
+      "args": ["google-ai-scraper"]
+    }
+  }
+}
+```
+
+### Option B: Background Service (SSE)
 
 Runs both FastAPI + MCP SSE as a single background service via `start-services.sh`. LaunchAgent auto-starts at login and restarts on crash.
 
 **Start manually:**
 ```bash
 cd server && ./start-services.sh
-# FastAPI on :8000, MCP SSE on :8001
+# FastAPI on :15551, MCP SSE on :8001
 ```
 
 **Or install as LaunchAgent (macOS):**
 ```bash
-# Copy the plist (edit paths if your clone is elsewhere)
 cp com.google-ai-scraper.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.google-ai-scraper.plist
 
 # Verify
-curl -s http://localhost:8000/health
+curl -s http://localhost:15551/health
 curl -s http://localhost:8001/sse --max-time 2  # should print "event: endpoint"
 
 # Logs
@@ -168,7 +206,6 @@ launchctl unload ~/Library/LaunchAgents/com.google-ai-scraper.plist
 
 **MCP client config (SSE) — connect to the running server:**
 
-Claude Code (`.mcp.json` or `claude mcp add`):
 ```json
 {
   "mcpServers": {
@@ -180,73 +217,23 @@ Claude Code (`.mcp.json` or `claude mcp add`):
 }
 ```
 
-Claude Desktop (`claude_desktop_config.json`):
-```json
-{
-  "mcpServers": {
-    "google-ai-scraper": {
-      "type": "sse",
-      "url": "http://localhost:8001/sse"
-    }
-  }
-}
+### CLI Options
+
+```
+google-ai-scraper [--sse] [--no-server] [--port PORT]
 ```
 
-Cursor (`.cursor/mcp.json`):
-```json
-{
-  "mcpServers": {
-    "google-ai-scraper": {
-      "url": "http://localhost:8001/sse"
-    }
-  }
-}
-```
-
-### Option B: Stdio (Per-Session)
-
-Spawns a fresh MCP server process per session. The FastAPI server must still be running separately.
-
-```bash
-# Terminal 1: start FastAPI
-cd server && uv run uvicorn main:app --port 8000
-
-# MCP client spawns the stdio process automatically via config
-```
-
-**MCP client config (stdio):**
-
-Claude Code (`.mcp.json`):
-```json
-{
-  "mcpServers": {
-    "google-ai-scraper": {
-      "command": "uv",
-      "args": ["run", "--directory", "/absolute/path/to/server", "google-ai-mcp"]
-    }
-  }
-}
-```
-
-Claude Desktop (`claude_desktop_config.json`):
-```json
-{
-  "mcpServers": {
-    "google-ai-scraper": {
-      "command": "uv",
-      "args": ["run", "--directory", "/absolute/path/to/server", "google-ai-mcp"]
-    }
-  }
-}
-```
-
-**Note:** stdio requires an absolute path to the `server/` directory. Use SSE if you want a path-independent config.
+| Flag | Default | Description |
+|---|---|---|
+| `--sse` | off | Use SSE transport instead of stdio |
+| `--no-server` | off | Don't start embedded FastAPI (if running separately) |
+| `--port` | 15551 | FastAPI server port |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `GOOGLE_AI_SCRAPER_URL` | `http://localhost:8000` | FastAPI server URL (if running on a different port/host) |
+| `GOOGLE_AI_SCRAPER_URL` | `http://127.0.0.1:15551` | FastAPI server URL (if running on a different port/host) |
 
 ## Key Design Decisions
 
@@ -281,10 +268,10 @@ Claude Desktop (`claude_desktop_config.json`):
 
 ## Changing Server Port
 
-If you change from port 8000, update both:
-1. `server/main.py` — uvicorn startup command
-2. `extension/background.js` — `SERVER` constant
-3. `extension/manifest.json` — `host_permissions`
+The default port is **15551**. To change it:
+1. MCP server: `google-ai-scraper --port XXXX` (or set `GOOGLE_AI_SCRAPER_URL` env var)
+2. Extension: Options page → change Server URL
+3. `host_permissions` in manifest.json already allows all localhost ports
 
 ## Browser Testing with Chrome DevTools MCP
 
@@ -296,9 +283,10 @@ If you change from port 8000, update both:
           --remote-debugging-port=9222 &
    ```
 
-2. **Start the FastAPI server:**
+2. **Start the server:**
    ```bash
-   cd server && uv run uvicorn main:app --port 8000
+   cd server && uv run google-ai-scraper --no-server & uv run uvicorn google_ai_scraper.app:app --port 15551
+   # Or simply: cd server && uv run google-ai-scraper
    ```
 
 3. **Load the extension:** `chrome://extensions` → Developer Mode → Load unpacked → select `extension/`
@@ -326,7 +314,7 @@ wait_for → "Reloaded"
 **3. Test the scraping pipeline (end-to-end):**
 ```bash
 # Server must be running. Then:
-curl -s "http://localhost:8000/ask?q=your+query" --max-time 35 | python3 -m json.tool
+curl -s "http://localhost:15551/ask?q=your+query" --max-time 35 | python3 -m json.tool
 ```
 The extension polls `/pending`, opens a background tab, scrapes, posts result, closes tab.
 
