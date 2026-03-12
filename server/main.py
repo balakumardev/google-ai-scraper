@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 THREAD_TTL = 120  # seconds of inactivity before auto-cleanup
+EXTENSION_STALE_THRESHOLD = 5.0  # seconds — extension polls every 1.5s
 
 
 class Thread:
@@ -42,6 +43,7 @@ pending_queries: dict[str, PendingQuery] = {}
 query_queue: deque[PendingQuery] = deque()
 active_threads: dict[str, Thread] = {}
 close_queue: deque[str] = deque()  # thread IDs for extension to close
+last_poll_time: float = 0.0
 
 
 async def _cleanup_expired_threads():
@@ -88,18 +90,25 @@ class ResultPayload(BaseModel):
 
 @app.get("/health")
 async def health():
+    poll_age = (time.monotonic() - last_poll_time) if last_poll_time else None
     return {
         "status": "ok",
         "pending": len(pending_queries),
         "queued": len(query_queue),
         "active_threads": len(active_threads),
+        "extension_connected": poll_age is not None and poll_age <= EXTENSION_STALE_THRESHOLD,
+        "last_poll_age_seconds": round(poll_age, 1) if poll_age is not None else None,
     }
 
 
 @app.get("/ask")
-async def ask(q: str, thread_id: str | None = None):
+async def ask(q: str, thread_id: str | None = None, close_thread: bool = False):
     if not q.strip():
         raise HTTPException(400, "query is required")
+
+    # Fail fast if extension hasn't polled recently
+    if last_poll_time == 0 or (time.monotonic() - last_poll_time) > EXTENSION_STALE_THRESHOLD:
+        raise HTTPException(503, "extension not connected — start Chrome with the extension loaded")
 
     # Thread validation
     if thread_id:
@@ -136,6 +145,9 @@ async def ask(q: str, thread_id: str | None = None):
         if thread:
             thread.busy = False
             thread.last_activity = time.monotonic()
+        if close_thread and thread:
+            active_threads.pop(pq.thread_id, None)
+            close_queue.append(pq.thread_id)
 
     return {
         "query": pq.query,
@@ -147,6 +159,9 @@ async def ask(q: str, thread_id: str | None = None):
 
 @app.get("/pending")
 async def get_pending():
+    global last_poll_time
+    last_poll_time = time.monotonic()
+
     # Drain close_queue
     threads_to_close = []
     while close_queue:

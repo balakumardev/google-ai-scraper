@@ -8,6 +8,8 @@
     <array>
         <string>/Users/balakumar/personal/google-ai-scraper/server/start-services.sh</string>
     </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/balakumar/personal/google-ai-scraper/server</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>

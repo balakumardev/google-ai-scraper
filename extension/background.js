@@ -75,20 +75,28 @@ async function pollServer() {
 }
 
 async function handleNewQuery(data) {
-  const url = `https://www.google.com/search?q=${encodeURIComponent(data.query)}&udm=50`;
-  const tab = await chrome.tabs.create({ url, active: false });
+  try {
+    const url = `https://www.google.com/search?q=${encodeURIComponent(data.query)}&udm=50`;
+    const tab = await chrome.tabs.create({ url, active: false });
 
-  const timeoutId = setTimeout(
-    () => handleTimeout(tab.id, data.query_id, data.thread_id, false),
-    TAB_TIMEOUT
-  );
-  activeTabs.set(tab.id, {
-    queryId: data.query_id,
-    threadId: data.thread_id,
-    timeoutId,
-  });
-  threadTabs.set(data.thread_id, tab.id);
-  await saveThreadTabs();
+    const timeoutId = setTimeout(
+      () => handleTimeout(tab.id, data.query_id, data.thread_id, false),
+      TAB_TIMEOUT
+    );
+    activeTabs.set(tab.id, {
+      queryId: data.query_id,
+      threadId: data.thread_id,
+      timeoutId,
+    });
+    threadTabs.set(data.thread_id, tab.id);
+    await saveThreadTabs();
+  } catch (err) {
+    await postResult(data.query_id, {
+      markdown: "",
+      citations: [],
+      error: `tab_create_failed: ${err.message}`,
+    }).catch(() => {});
+  }
 }
 
 async function handleFollowUp(data) {
@@ -129,11 +137,21 @@ async function handleFollowUp(data) {
 
   // Send follow-up to content script
   try {
-    await chrome.tabs.sendMessage(tabId, {
+    const response = await chrome.tabs.sendMessage(tabId, {
       type: "FOLLOW_UP_QUERY",
       query: data.query,
       queryId: data.query_id,
     });
+    // Content script rejected (e.g. follow_up_in_progress)
+    if (response && response.received === false && activeTabs.has(tabId)) {
+      clearTimeout(activeTabs.get(tabId).timeoutId);
+      activeTabs.delete(tabId);
+      await postResult(data.query_id, {
+        markdown: "",
+        citations: [],
+        error: response.error || "follow_up_rejected",
+      }).catch(() => {});
+    }
   } catch {
     clearTimeout(timeoutId);
     activeTabs.delete(tabId);
@@ -216,6 +234,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   const entry = activeTabs.get(tabId);
   if (entry) {
+    // Notify server immediately so /ask doesn't hang until timeout
+    postResult(entry.queryId, {
+      markdown: "",
+      citations: [],
+      error: "tab_closed_externally",
+    }).catch(() => {});
     clearTimeout(entry.timeoutId);
     activeTabs.delete(tabId);
     threadTabs.delete(entry.threadId);

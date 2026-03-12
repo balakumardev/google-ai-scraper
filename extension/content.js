@@ -197,20 +197,27 @@
   }
 
   function scrapeAndSend() {
-    const container = findAIOverviewContainer();
-    if (!container) {
+    try {
+      const container = findAIOverviewContainer();
+      if (!container) {
+        chrome.runtime.sendMessage({
+          type: "AI_OVERVIEW_RESULT",
+          data: { markdown: "", citations: [], error: "no_ai_overview" },
+        });
+        return;
+      }
+
+      const { markdown, citations } = extractContent(container);
       chrome.runtime.sendMessage({
         type: "AI_OVERVIEW_RESULT",
-        data: { markdown: "", citations: [], error: "no_ai_overview" },
+        data: { markdown, citations, error: null },
       });
-      return;
+    } catch (err) {
+      chrome.runtime.sendMessage({
+        type: "AI_OVERVIEW_RESULT",
+        data: { markdown: "", citations: [], error: `extraction_error: ${err.message}` },
+      });
     }
-
-    const { markdown, citations } = extractContent(container);
-    chrome.runtime.sendMessage({
-      type: "AI_OVERVIEW_RESULT",
-      data: { markdown, citations, error: null },
-    });
   }
 
   /**
@@ -271,6 +278,11 @@
 
     if (followUpInProgress) {
       sendResponse({ received: false, error: "follow_up_in_progress" });
+      // Also send result so background.js can notify server immediately
+      chrome.runtime.sendMessage({
+        type: "AI_OVERVIEW_RESULT",
+        data: { markdown: "", citations: [], error: "follow_up_in_progress" },
+      });
       return;
     }
 
