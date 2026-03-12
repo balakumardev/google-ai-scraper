@@ -1,0 +1,62 @@
+name: Auto Version & Publish
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "server/**"
+      - "extension/**"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Bump version
+        id: bump
+        working-directory: server
+        run: |
+          # Read current version
+          current=$(grep -Po '(?<=version = ")[^"]+' pyproject.toml)
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+
+          # Split into parts and bump patch
+          IFS='.' read -r major minor patch <<< "$current"
+          new_version="$major.$minor.$((patch + 1))"
+          echo "new=$new_version" >> "$GITHUB_OUTPUT"
+
+          # Update both files
+          sed -i "s/version = \"$current\"/version = \"$new_version\"/" pyproject.toml
+          sed -i "s/__version__ = \"$current\"/__version__ = \"$new_version\"/" google_ai_scraper/__init__.py
+
+          echo "Bumped $current → $new_version"
+
+      - name: Build
+        working-directory: server
+        run: uv build
+
+      - name: Publish to PyPI
+        working-directory: server
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.UV_PUBLISH_TOKEN }}
+        run: uv publish
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add server/pyproject.toml server/google_ai_scraper/__init__.py
+          git commit -m "Bump version to ${{ steps.bump.outputs.new }} [skip ci]"
+          git push
