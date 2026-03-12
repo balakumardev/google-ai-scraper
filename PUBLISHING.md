@@ -86,7 +86,36 @@ kill %1
 
 Review typically takes 1-3 business days.
 
-### Update Extension
+### CI Auto-Publish (after first approval)
+
+Once the extension is approved, future pushes to `extension/` auto-publish via GitHub Actions.
+
+**One-time setup — get OAuth credentials:**
+
+1. Go to https://console.cloud.google.com/ → create a project (or use existing)
+2. Enable the **Chrome Web Store API**: https://console.cloud.google.com/apis/library/chromewebstore.googleapis.com
+3. Create OAuth credentials:
+   - APIs & Services → Credentials → Create Credentials → OAuth client ID
+   - Application type: **Web application**
+   - Authorized redirect URI: `https://developers.google.com/oauthplayground`
+   - Copy the **Client ID** and **Client Secret**
+4. Get a refresh token:
+   - Go to https://developers.google.com/oauthplayground/
+   - Click gear icon → check "Use your own OAuth credentials" → paste Client ID & Secret
+   - In Step 1, enter scope: `https://www.googleapis.com/auth/chromewebstore`
+   - Authorize → Exchange authorization code → copy the **Refresh Token**
+5. Get your extension ID from the Chrome Web Store Developer Dashboard URL
+6. Add GitHub secrets:
+   ```bash
+   gh secret set CWS_CLIENT_ID --body "your-client-id"
+   gh secret set CWS_CLIENT_SECRET --body "your-client-secret"
+   gh secret set CWS_REFRESH_TOKEN --body "your-refresh-token"
+   gh secret set CWS_EXTENSION_ID --body "your-extension-id"
+   ```
+
+After this, any push to `main` that changes `extension/` will auto-bump version, ZIP, upload, and publish.
+
+### Manual Update (alternative)
 
 1. Bump `version` in `extension/manifest.json`
 2. Re-ZIP and upload to developer console

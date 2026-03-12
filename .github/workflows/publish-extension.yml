@@ -1,0 +1,44 @@
+name: Publish Chrome Extension
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "extension/**"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bump extension version
+        working-directory: extension
+        run: |
+          current=$(grep -Po '(?<="version": ")[^"]+' manifest.json)
+          IFS='.' read -r major minor <<< "$current"
+          new_version="$major.$((minor + 1))"
+          sed -i "s/\"version\": \"$current\"/\"version\": \"$new_version\"/" manifest.json
+          echo "Bumped extension $current → $new_version"
+          echo "new=$new_version" >> "$GITHUB_OUTPUT"
+
+      - name: Create ZIP
+        run: cd extension && zip -r ../extension.zip . -x ".*"
+
+      - name: Upload & Publish to Chrome Web Store
+        uses: mobilefirstllc/cws-publish@latest
+        with:
+          action: publish
+          client_id: ${{ secrets.CWS_CLIENT_ID }}
+          client_secret: ${{ secrets.CWS_CLIENT_SECRET }}
+          refresh_token: ${{ secrets.CWS_REFRESH_TOKEN }}
+          extension_id: ${{ secrets.CWS_EXTENSION_ID }}
+          zip_file: extension.zip
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add extension/manifest.json
+          git commit -m "Bump extension version [skip ci]"
+          git push
