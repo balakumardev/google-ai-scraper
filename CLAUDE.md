@@ -120,8 +120,9 @@ pip install google-ai-scraper && google-ai-scraper
 # Start server
 cd server && uv run uvicorn google_ai_scraper.app:app --port 15551
 
-# Load extension
-# chrome://extensions → Developer Mode → Load unpacked → select extension/
+# Install the published extension from the Chrome Web Store:
+# https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en
+# Default server URL already matches http://localhost:15551
 
 # Test
 curl -s "http://localhost:15551/health"
@@ -148,7 +149,7 @@ The MCP server (`server/google_ai_scraper/mcp_server/server.py`) wraps the FastA
 
 ### Prerequisites
 
-1. **Chrome** running with the extension loaded (chrome://extensions → Load unpacked → `extension/`, or install from Chrome Web Store)
+1. **Chrome** with the published extension installed: https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en
 
 ### Setup
 
@@ -289,7 +290,7 @@ The default port is **15551**. To change it:
    # Or simply: cd server && uv run google-ai-scraper
    ```
 
-3. **Load the extension:** `chrome://extensions` → Developer Mode → Load unpacked → select `extension/`
+3. **Install the extension:** https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en
 
 4. **Start Claude Code** in this directory
 
@@ -299,16 +300,14 @@ Use these MCP tools to test the full scraping pipeline without manually opening 
 
 **1. Verify extension is loaded:**
 ```
-navigate_page → chrome://extensions
-take_snapshot → look for "Google AI Overview Scraper" with "On, extension enabled"
+navigate_page → https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en
+take_snapshot → look for "Remove from Chrome" or "Added to Chrome"
 ```
 
-**2. Reload extension after code changes:**
+**2. Verify the extension options page:**
 ```
-navigate_page → chrome://extensions
-take_snapshot → find the Reload button uid
-click → uid of Reload button
-wait_for → "Reloaded"
+navigate_page → chrome-extension://oidaeopefkgfpeigcjapebhppnbcocpc/options.html
+take_snapshot → look for the server URL field
 ```
 
 **3. Test the scraping pipeline (end-to-end):**
@@ -362,7 +361,7 @@ evaluate_script → verify TurndownService is available (if extension loaded)
 
 | Symptom | Check |
 |---|---|
-| Extension not polling | Service worker may be inactive — reload extension on chrome://extensions |
+| Extension not polling | Service worker may be inactive — disable/re-enable the extension in Chrome, then confirm its server URL still matches the local server |
 | Polling stops after one request | Bug: early `return` skipping `setTimeout` — ensure all returns are inside `if` blocks |
 | Empty markdown but citations exist | Source card removal too aggressive — check `links > 3 && imgs > 3` heuristic against wrapper direct children only |
 | Section headings missing | `[role="heading"]` being stripped — only first heading (query title) should be removed |

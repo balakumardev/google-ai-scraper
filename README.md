@@ -21,7 +21,19 @@ MCP Client / HTTP Client
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - Chrome (or Chromium-based browser)
 
-## Setup
+## Quick Install
+
+```bash
+uvx google-ai-scraper
+```
+
+Install the published extension from the Chrome Web Store:
+
+https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en
+
+The published extension defaults to `http://localhost:15551`, which matches `uvx google-ai-scraper`.
+
+## Local Development Setup
 
 ### 1. Install dependencies
 
@@ -30,11 +42,13 @@ cd server
 uv sync
 ```
 
-### 2. Load the Chrome extension
+### 2. Install the Chrome extension
 
-1. Open `chrome://extensions`
-2. Enable **Developer Mode** (top right)
-3. Click **Load unpacked** → select the `extension/` directory
+Install the published extension from the Chrome Web Store:
+
+https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en
+
+Then open the extension's options page and set the server URL to `http://localhost:8000`.
 
 ### 3. Start the FastAPI server
 

@@ -110,7 +110,7 @@ async def ask(q: str, thread_id: str | None = None, close_thread: bool = False):
     if last_poll_time == 0:
         raise HTTPException(
             503,
-            "Browser extension not connected. Start Chrome, install the extension from the Chrome Web Store, and set the extension's server URL to this server. The extension must be polling for requests to work.",
+            "Browser extension not connected. Start Chrome, install the extension from https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en, and set the extension's server URL to this server. The extension must be polling for requests to work.",
         )
     poll_age = time.monotonic() - last_poll_time
     if poll_age > EXTENSION_STALE_THRESHOLD:

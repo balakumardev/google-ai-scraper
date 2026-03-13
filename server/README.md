@@ -27,7 +27,7 @@ pip install google-ai-scraper
 
 ### Prerequisites
 
-1. **Chrome** with the [Google AI Overview Scraper extension](https://github.com/balakumardev/google-ai-scraper) installed
+1. **Chrome** with the [Google AI Overview Scraper extension](https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en) installed
 2. **Python 3.10+**
 
 ## MCP Client Configuration
