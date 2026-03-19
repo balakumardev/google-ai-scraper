@@ -5,11 +5,12 @@ const ALARM_NAME = "poll-server";
 
 let serverUrl = DEFAULT_SERVER;
 
-// Map<tabId, {queryId, threadId, timeoutId}>
+// Map<tabId, {queryId, threadId, isFollowUp, deadlineAt, timeoutId}>
 const activeTabs = new Map();
 // Map<threadId, tabId> — also persisted to chrome.storage.session
 let threadTabs = new Map();
 let pollInFlight = false;
+let isInitialized = false;
 const startupPromise = initialize();
 
 // --- Server URL from options ---
@@ -125,11 +126,13 @@ async function clearActiveTab(tabId) {
 }
 
 async function ensureInitialized() {
+  if (isInitialized) return;
   await startupPromise;
 }
 
 async function initialize() {
   await Promise.all([loadThreadTabs(), loadActiveTabs(), loadServerUrl()]);
+  isInitialized = true;
   await startPolling();
 }
 
@@ -152,6 +155,7 @@ async function startPolling() {
 }
 
 async function pollServer() {
+  await ensureInitialized();
   if (pollInFlight) return;
   pollInFlight = true;
 
@@ -189,8 +193,9 @@ async function pollServer() {
 }
 
 async function handleNewQuery(data) {
+  await ensureInitialized();
   try {
-    const url = `https://www.google.com/search?q=${encodeURIComponent(data.query)}&udm=50`;
+    const url = `https://www.google.com/search?q=${encodeURIComponent(data.query)}&udm=50&arv=1`;
     const tab = await chrome.tabs.create({ url, active: false });
 
     threadTabs.set(data.thread_id, tab.id);
@@ -252,9 +257,9 @@ async function handleFollowUp(data) {
       queryId: data.query_id,
     });
     // Content script rejected (e.g. follow_up_in_progress)
-    if (response && response.received === false && activeTabs.has(tabId)) {
-      clearTimeout(activeTabs.get(tabId).timeoutId);
-      activeTabs.delete(tabId);
+    if (response && response.received === false) {
+      const entry = await clearActiveTab(tabId);
+      if (!entry) return;
       await postResult(data.query_id, {
         markdown: "",
         citations: [],
