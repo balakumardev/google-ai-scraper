@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Google AI Overview Scraper",
-  "version": "2.2",
+  "version": "2.3",
   "description": "Extracts Google AI Overviews as structured markdown via a local MCP server",
   "permissions": ["tabs", "scripting", "alarms", "storage"],
   "host_permissions": [
