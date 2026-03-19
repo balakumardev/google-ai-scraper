@@ -8,7 +8,7 @@ Scrapes Google AI Overviews via a Chrome extension relay — no browser focus st
 MCP Client (Claude Code, Cursor, etc.)
     ↕ stdio or SSE
 MCP Server (server/google_ai_scraper/mcp_server/server.py)
-    ↕ httpx (embedded FastAPI on port 15551)
+    ↕ httpx (shared FastAPI backend on port 15551)
 FastAPI Server (server/google_ai_scraper/app.py)
     ↕ polling (1.5s)
 Chrome Extension Background Worker
@@ -31,12 +31,12 @@ Supports **conversational follow-ups** via thread IDs. First query creates a thr
 server/
   pyproject.toml           # Package metadata + deps (published to PyPI)
   google_ai_scraper/       # Python package
-    __init__.py            # __version__ = "0.2.0"
+    __init__.py            # __version__
     app.py                 # FastAPI app
     mcp_server/
       __init__.py
-      server.py            # MCP server — embeds FastAPI, entry point for `uvx google-ai-scraper`
-  start-services.sh        # Launches FastAPI + MCP SSE together (used by LaunchAgent)
+      server.py            # MCP server + shared backend launcher, entry point for `uvx google-ai-scraper`
+  start-services.sh        # Launches shared FastAPI backend + MCP SSE together (used by LaunchAgent)
 extension/
   manifest.json            # Manifest V3
   background.js            # Service worker: polls server, manages tabs
@@ -137,7 +137,7 @@ curl -s -X DELETE "http://localhost:15551/thread/THREAD_ID"
 
 ## MCP Server
 
-The MCP server (`server/google_ai_scraper/mcp_server/server.py`) wraps the FastAPI endpoints as 3 MCP tools. By default it embeds the FastAPI server in a daemon thread (port 15551), so a single `uvx google-ai-scraper` starts everything.
+The MCP server (`server/google_ai_scraper/mcp_server/server.py`) wraps the FastAPI endpoints as 3 MCP tools. In default stdio mode, each MCP client process auto-reuses or auto-starts the shared FastAPI backend on port 15551, so multiple Claude Code windows can use the same simple config safely.
 
 ### MCP Tools
 
@@ -154,7 +154,7 @@ The MCP server (`server/google_ai_scraper/mcp_server/server.py`) wraps the FastA
 ### Setup
 
 ```bash
-# From PyPI (recommended)
+# From PyPI (recommended for MCP clients)
 uvx google-ai-scraper
 
 # Or from source
@@ -163,7 +163,7 @@ cd server && uv sync && uv run google-ai-scraper
 
 ### Option A: Stdio (Recommended for MCP clients)
 
-Single command starts FastAPI (port 15551) + MCP stdio. No separate server needed.
+Each MCP client runs its own stdio process, but those processes auto-reuse or auto-start one shared FastAPI backend on port 15551. No separate manual backend startup is required for the common case.
 
 **MCP client config (stdio):**
 
@@ -181,7 +181,7 @@ Claude Code / Claude Desktop / Cursor:
 
 ### Option B: Background Service (SSE)
 
-Runs both FastAPI + MCP SSE as a single background service via `start-services.sh`. LaunchAgent auto-starts at login and restarts on crash.
+Runs the shared FastAPI backend plus MCP SSE as a single background service via `start-services.sh`. LaunchAgent auto-starts at login and restarts on crash.
 
 **Start manually:**
 ```bash
@@ -221,13 +221,14 @@ launchctl unload ~/Library/LaunchAgents/com.google-ai-scraper.plist
 ### CLI Options
 
 ```
-google-ai-scraper [--sse] [--no-server] [--port PORT]
+google-ai-scraper [--sse] [--no-server] [--backend] [--port PORT]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--sse` | off | Use SSE transport instead of stdio |
-| `--no-server` | off | Don't start embedded FastAPI (if running separately) |
+| `--no-server` | off | Don't auto-start or reuse the shared FastAPI backend |
+| `--backend` | off | Run only the shared FastAPI backend |
 | `--port` | 15551 | FastAPI server port |
 
 ### Environment Variables
@@ -286,8 +287,8 @@ The default port is **15551**. To change it:
 
 2. **Start the server:**
    ```bash
-   cd server && uv run google-ai-scraper --no-server & uv run uvicorn google_ai_scraper.app:app --port 15551
-   # Or simply: cd server && uv run google-ai-scraper
+   cd server && uv run google-ai-scraper --backend --port 15551
+   # Or for SSE setups: cd server && ./start-services.sh
    ```
 
 3. **Install the extension:** https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en

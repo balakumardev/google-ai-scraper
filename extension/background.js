@@ -1,6 +1,8 @@
 const DEFAULT_SERVER = "http://localhost:15551";
 const POLL_INTERVAL = 1500;
-const TAB_TIMEOUT = 28000;
+// 60s extraction budget + 8s buffer so background.js can return tab_timeout
+// before the FastAPI request-level timeout expires.
+const TAB_TIMEOUT = 68000;
 const ALARM_NAME = "poll-server";
 
 let serverUrl = DEFAULT_SERVER;

@@ -10,9 +10,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Start FastAPI server
+# Start shared FastAPI backend
 cd "$DIR"
-uv run uvicorn google_ai_scraper.app:app --port 15551 &
+uv run google-ai-scraper --backend --port 15551 &
 FASTAPI_PID=$!
 
 # Start MCP SSE server (--no-server since FastAPI runs separately above)

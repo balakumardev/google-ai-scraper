@@ -3,8 +3,10 @@
   const params = new URLSearchParams(window.location.search);
   if (params.get("udm") !== "50") return;
 
-  const STABILITY_DELAY = 3000;
-  const MAX_WAIT = 25000;
+  const EXTRACTION_MAX_WAIT = 60000;
+  const EXTRACTION_POLL_INTERVAL = 500;
+  const EXTRACTION_STABILITY_DELAY = 3000;
+  const FOLLOW_UP_INPUT_SETTLE_DELAY = 300;
 
   let followUpInProgress = false;
 
@@ -145,11 +147,21 @@
     return citations;
   }
 
+  function stripNonContentElements(root) {
+    root
+      .querySelectorAll(
+        'style, script, noscript, template, link[rel="stylesheet"]'
+      )
+      .forEach((el) => el.remove());
+  }
+
   function extractContent(container) {
     // Use main-col for markdown (AI response only), fall back to full container
     const mainCol = container.querySelector('[data-container-id="main-col"]');
     const contentSource = mainCol || container;
     const clone = contentSource.cloneNode(true);
+
+    stripNonContentElements(clone);
 
     // Strip UI elements: buttons, SVGs, badges
     clone
@@ -196,56 +208,106 @@
     return { markdown, citations };
   }
 
-  function scrapeAndSend() {
-    try {
-      const container = findAIOverviewContainer();
-      if (!container) {
-        chrome.runtime.sendMessage({
-          type: "AI_OVERVIEW_RESULT",
-          data: { markdown: "", citations: [], error: "no_ai_overview" },
-        });
-        return;
-      }
+  function hasMeaningfulMarkdown(markdown) {
+    const text = markdown
+      .replace(/[`*_#[\]()>-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
 
-      const { markdown, citations } = extractContent(container);
-      chrome.runtime.sendMessage({
-        type: "AI_OVERVIEW_RESULT",
-        data: { markdown, citations, error: null },
-      });
-    } catch (err) {
-      chrome.runtime.sendMessage({
-        type: "AI_OVERVIEW_RESULT",
-        data: { markdown: "", citations: [], error: `extraction_error: ${err.message}` },
-      });
+    if (!text) return false;
+
+    const lower = text.toLowerCase();
+    if (
+      lower === "loading" ||
+      lower === "generating" ||
+      lower === "searching" ||
+      lower === "thinking"
+    ) {
+      return false;
     }
+
+    const alnumLength = text.replace(/[^a-z0-9]/gi, "").length;
+    return alnumLength >= 7;
   }
 
-  /**
-   * Wait for DOM stability then call callback.
-   * Returns a cancel function.
-   */
-  function waitForStability(callback, maxWait = MAX_WAIT) {
-    let stabilityTimer = null;
+  function finalizeExtractionResult(markdown, citations, emptyError) {
+    const cleanMarkdown = markdown.trim();
+    if (!hasMeaningfulMarkdown(cleanMarkdown) && citations.length === 0) {
+      return { markdown: "", citations: [], error: emptyError };
+    }
+    return { markdown: cleanMarkdown, citations, error: null };
+  }
+
+  function extractionSignature(markdown, citations) {
+    return `${markdown.trim()}\n---\n${citations.join("\n")}`;
+  }
+
+  function sendResult(data) {
+    chrome.runtime.sendMessage({
+      type: "AI_OVERVIEW_RESULT",
+      data,
+    });
+  }
+
+  function waitForExtraction(
+    extractFn,
+    onDone,
+    fallbackError,
+    maxWait = EXTRACTION_MAX_WAIT
+  ) {
+    let pollTimer = null;
     let maxTimer = null;
+    let stableTimer = null;
     let obs = null;
     let finished = false;
+    let lastResult = { markdown: "", citations: [], error: fallbackError };
+    let lastMeaningfulSignature = null;
 
-    function finish() {
+    function finish(result) {
       if (finished) return;
       finished = true;
       if (obs) obs.disconnect();
-      clearTimeout(stabilityTimer);
+      clearInterval(pollTimer);
+       clearTimeout(stableTimer);
       clearTimeout(maxTimer);
-      callback();
+      onDone(result);
     }
 
-    function resetTimer() {
-      clearTimeout(stabilityTimer);
-      stabilityTimer = setTimeout(finish, STABILITY_DELAY);
+    function attempt() {
+      if (finished) return;
+      try {
+        const result = extractFn();
+        if (!result) return;
+        lastResult = result;
+
+        if (result.markdown.trim() || result.citations.length > 0) {
+          const signature = extractionSignature(
+            result.markdown,
+            result.citations
+          );
+          if (signature !== lastMeaningfulSignature) {
+            lastMeaningfulSignature = signature;
+            clearTimeout(stableTimer);
+            stableTimer = setTimeout(
+              () => finish(result),
+              EXTRACTION_STABILITY_DELAY
+            );
+          }
+        } else {
+          lastMeaningfulSignature = null;
+          clearTimeout(stableTimer);
+        }
+      } catch (err) {
+        finish({
+          markdown: "",
+          citations: [],
+          error: `extraction_error: ${err.message}`,
+        });
+      }
     }
 
     obs = new MutationObserver(() => {
-      resetTimer();
+      attempt();
     });
 
     obs.observe(document.body, {
@@ -254,23 +316,119 @@
       characterData: true,
     });
 
-    // Start the stability timer (if page is already stable)
-    resetTimer();
+    pollTimer = setInterval(attempt, EXTRACTION_POLL_INTERVAL);
+    maxTimer = setTimeout(() => finish(lastResult), maxWait);
+    attempt();
+  }
 
-    // Absolute max wait
-    maxTimer = setTimeout(finish, maxWait);
+  function tryExtractInitialOverview() {
+    const container = findAIOverviewContainer();
+    if (!container) return null;
 
-    // Return cancel function
-    return () => {
-      finished = true;
-      if (obs) obs.disconnect();
-      clearTimeout(stabilityTimer);
-      clearTimeout(maxTimer);
-    };
+    const { markdown, citations } = extractContent(container);
+    return finalizeExtractionResult(
+      markdown,
+      citations,
+      "empty_ai_overview_extraction"
+    );
+  }
+
+  function extractFollowUpSnapshot() {
+    const allMainCols = document.querySelectorAll(
+      '[data-container-id="main-col"]'
+    );
+    if (allMainCols.length === 0) {
+      return { markdown: "", citations: [] };
+    }
+
+    const lastMainCol = allMainCols[allMainCols.length - 1];
+    const lastAimcContainer =
+      lastMainCol.closest('[data-subtree="aimc"]') || findAIOverviewContainer();
+    if (!lastAimcContainer) {
+      return { markdown: "", citations: [] };
+    }
+
+    return extractContent(lastAimcContainer);
+  }
+
+  function tryExtractFollowUp(prevMainColCount, prevSignature) {
+    const allMainCols = document.querySelectorAll(
+      '[data-container-id="main-col"]'
+    );
+
+    if (allMainCols.length === 0) {
+      return null;
+    }
+
+    if (allMainCols.length > prevMainColCount) {
+      // New main-col appeared — extract only from it
+      const newMainCol = allMainCols[allMainCols.length - 1];
+      const tempContainer = newMainCol.cloneNode(true);
+
+      stripNonContentElements(tempContainer);
+
+      // Apply same cleanup as extractContent
+      tempContainer
+        .querySelectorAll(
+          '[data-dtype], button, [role="button"], svg, [data-subtree="aimba"]'
+        )
+        .forEach((el) => el.remove());
+      tempContainer
+        .querySelectorAll('img[src^="data:"]')
+        .forEach((el) => el.remove());
+
+      // Remove source card clusters and feedback from wrapper children
+      const wrapper = tempContainer.children[0] || tempContainer;
+      const toRemove = [];
+      for (const child of wrapper?.children || []) {
+        const links = child.querySelectorAll("a").length;
+        const imgs = child.querySelectorAll("img").length;
+        if (links > 3 && imgs > 3) {
+          toRemove.push(child);
+          continue;
+        }
+        if (child.querySelector('a[href*="policies.google.com"]')) {
+          toRemove.push(child);
+        }
+      }
+      toRemove.forEach((el) => el.remove());
+
+      // Remove first heading (follow-up question echo)
+      const firstH = tempContainer.querySelector(
+        'h2, h3, [role="heading"]'
+      );
+      if (firstH) firstH.remove();
+
+      const td = createTurndownService();
+      const markdown = td.turndown(tempContainer.innerHTML).trim();
+      const allAimcs = document.querySelectorAll('[data-subtree="aimc"]');
+      const lastAimc = allAimcs[allAimcs.length - 1];
+      const citations = extractCitations(lastAimc || document.body);
+      return finalizeExtractionResult(
+        markdown,
+        citations,
+        "empty_follow_up_extraction"
+      );
+    }
+
+    const { markdown, citations } = extractFollowUpSnapshot();
+    if (extractionSignature(markdown, citations) === prevSignature) {
+      return null;
+    }
+
+    return finalizeExtractionResult(
+      markdown,
+      citations,
+      "empty_follow_up_extraction"
+    );
   }
 
   // --- Initial scrape ---
-  waitForStability(() => scrapeAndSend());
+  waitForExtraction(
+    tryExtractInitialOverview,
+    (result) => sendResult(result),
+    "no_ai_overview"
+  );
 
   // --- Follow-up query handler ---
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -327,12 +485,18 @@
         return;
       }
 
-      // 2. Snapshot current main-col count across the whole page.
+      // 2. Snapshot current main-col count and latest extracted content so we
+      // can tell when Google has actually rendered a new answer.
       // Follow-ups may create a new aimc container (not just a new main-col
       // within the same container), so we search document-wide.
       const prevMainColCount = document.querySelectorAll(
         '[data-container-id="main-col"]'
       ).length;
+      const prevSnapshot = extractFollowUpSnapshot();
+      const prevSignature = extractionSignature(
+        prevSnapshot.markdown,
+        prevSnapshot.citations
+      );
 
       // 3. Type query into input
       textbox.focus();
@@ -357,7 +521,7 @@
       }
 
       // Small delay for UI to react (e.g. show submit button)
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, FOLLOW_UP_INPUT_SETTLE_DELAY));
 
       // 4. Submit: find nearby submit button or press Enter
       const submitted = await submitFollowUp(textbox);
@@ -373,89 +537,15 @@
         return;
       }
 
-      // 5. Wait for Google to start streaming the response
-      await new Promise((r) => setTimeout(r, 800));
-
-      // 6. Wait for stability then scrape
-      waitForStability(() => {
-        // Google creates a new aimc container (and main-col) for each
-        // follow-up. Search document-wide, not scoped to one container.
-        const allMainCols = document.querySelectorAll(
-          '[data-container-id="main-col"]'
-        );
-
-        if (allMainCols.length === 0) {
-          chrome.runtime.sendMessage({
-            type: "AI_OVERVIEW_RESULT",
-            data: {
-              markdown: "",
-              citations: [],
-              error: "no_ai_overview_after_follow_up",
-            },
-          });
+      // 5. Wait until the newly rendered follow-up is actually extractable.
+      waitForExtraction(
+        () => tryExtractFollowUp(prevMainColCount, prevSignature),
+        (result) => {
+          sendResult(result);
           followUpInProgress = false;
-          return;
-        }
-        let result;
-
-        if (allMainCols.length > prevMainColCount) {
-          // New main-col appeared — extract only from it
-          const newMainCol = allMainCols[allMainCols.length - 1];
-          const tempContainer = newMainCol.cloneNode(true);
-
-          // Apply same cleanup as extractContent
-          tempContainer
-            .querySelectorAll(
-              '[data-dtype], button, [role="button"], svg, [data-subtree="aimba"]'
-            )
-            .forEach((el) => el.remove());
-          tempContainer
-            .querySelectorAll('img[src^="data:"]')
-            .forEach((el) => el.remove());
-
-          // Remove source card clusters and feedback from wrapper children
-          const wrapper = tempContainer.children[0] || tempContainer;
-          const toRemove = [];
-          for (const child of wrapper?.children || []) {
-            const links = child.querySelectorAll("a").length;
-            const imgs = child.querySelectorAll("img").length;
-            if (links > 3 && imgs > 3) {
-              toRemove.push(child);
-              continue;
-            }
-            if (child.querySelector('a[href*="policies.google.com"]')) {
-              toRemove.push(child);
-            }
-          }
-          toRemove.forEach((el) => el.remove());
-
-          // Remove first heading (follow-up question echo)
-          const firstH = tempContainer.querySelector(
-            'h2, h3, [role="heading"]'
-          );
-          if (firstH) firstH.remove();
-
-          const td = createTurndownService();
-          const markdown = td.turndown(tempContainer.innerHTML).trim();
-          // Get citations from the last aimc container
-          const allAimcs = document.querySelectorAll('[data-subtree="aimc"]');
-          const lastAimc = allAimcs[allAimcs.length - 1];
-          const citations = extractCitations(lastAimc || document.body);
-          result = { markdown, citations, error: null };
-        } else {
-          // Fallback: extract from the last main-col
-          const lastMainCol = allMainCols[allMainCols.length - 1];
-          const lastAimcContainer = lastMainCol.closest('[data-subtree="aimc"]') || findAIOverviewContainer();
-          result = extractContent(lastAimcContainer);
-          result.error = null;
-        }
-
-        chrome.runtime.sendMessage({
-          type: "AI_OVERVIEW_RESULT",
-          data: result,
-        });
-        followUpInProgress = false;
-      });
+        },
+        "no_ai_overview_after_follow_up"
+      );
     } catch (err) {
       chrome.runtime.sendMessage({
         type: "AI_OVERVIEW_RESULT",

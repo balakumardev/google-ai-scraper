@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 THREAD_TTL = 120  # seconds of inactivity before auto-cleanup
 EXTENSION_STALE_THRESHOLD = 5.0  # seconds — extension polls every 1.5s
+QUERY_TIMEOUT = 70.0  # seconds — above background tab timeout to preserve explicit tab_timeout errors
 
 
 class Thread:
@@ -142,7 +143,7 @@ async def ask(q: str, thread_id: str | None = None, close_thread: bool = False):
     query_queue.append(pq)
 
     try:
-        await asyncio.wait_for(pq.event.wait(), timeout=30.0)
+        await asyncio.wait_for(pq.event.wait(), timeout=QUERY_TIMEOUT)
     except asyncio.TimeoutError:
         raise HTTPException(504, "extension did not respond in time")
     finally:
