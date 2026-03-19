@@ -9,6 +9,8 @@ let serverUrl = DEFAULT_SERVER;
 const activeTabs = new Map();
 // Map<threadId, tabId> — also persisted to chrome.storage.session
 let threadTabs = new Map();
+let pollInFlight = false;
+const startupPromise = initialize();
 
 // --- Server URL from options ---
 
@@ -23,9 +25,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
-// --- Persistence for threadTabs ---
-// Service workers can restart at any time (MV3). Persist threadTabs so
-// close_threads from the server can still find the right tab after restart.
+// --- Persistence for threadTabs + activeTabs ---
+// MV3 service workers can restart at any time, so keep both the persistent
+// thread->tab mapping and the in-flight query->tab mapping in session storage.
 
 async function saveThreadTabs() {
   const obj = Object.fromEntries(threadTabs);
@@ -35,8 +37,100 @@ async function saveThreadTabs() {
 async function loadThreadTabs() {
   const data = await chrome.storage.session.get("threadTabs");
   if (data.threadTabs) {
-    threadTabs = new Map(Object.entries(data.threadTabs));
+    threadTabs = new Map(
+      Object.entries(data.threadTabs)
+        .map(([threadId, tabId]) => [threadId, Number(tabId)])
+        .filter(([, tabId]) => Number.isInteger(tabId))
+    );
   }
+}
+
+function serializeActiveTabs() {
+  const obj = {};
+  for (const [tabId, entry] of activeTabs.entries()) {
+    obj[tabId] = {
+      queryId: entry.queryId,
+      threadId: entry.threadId,
+      isFollowUp: entry.isFollowUp,
+      deadlineAt: entry.deadlineAt,
+    };
+  }
+  return obj;
+}
+
+async function saveActiveTabs() {
+  await chrome.storage.session.set({ activeTabs: serializeActiveTabs() });
+}
+
+function clearEntryTimeout(entry) {
+  if (entry?.timeoutId) {
+    clearTimeout(entry.timeoutId);
+  }
+}
+
+function scheduleTimeout(tabId, entry) {
+  clearEntryTimeout(entry);
+  const delay = Math.max(0, entry.deadlineAt - Date.now());
+  entry.timeoutId = setTimeout(
+    () => handleTimeout(tabId, entry.queryId, entry.threadId, entry.isFollowUp),
+    delay
+  );
+}
+
+async function loadActiveTabs() {
+  const data = await chrome.storage.session.get("activeTabs");
+  activeTabs.clear();
+
+  for (const [tabIdRaw, persisted] of Object.entries(data.activeTabs || {})) {
+    const tabId = Number(tabIdRaw);
+    if (!Number.isInteger(tabId)) continue;
+
+    const entry = {
+      queryId: persisted.queryId,
+      threadId: persisted.threadId,
+      isFollowUp: Boolean(persisted.isFollowUp),
+      deadlineAt: Number(persisted.deadlineAt) || Date.now(),
+      timeoutId: null,
+    };
+    activeTabs.set(tabId, entry);
+    scheduleTimeout(tabId, entry);
+  }
+}
+
+async function trackActiveTab(tabId, { queryId, threadId, isFollowUp }) {
+  const existing = activeTabs.get(tabId);
+  clearEntryTimeout(existing);
+
+  const entry = {
+    queryId,
+    threadId,
+    isFollowUp,
+    deadlineAt: Date.now() + TAB_TIMEOUT,
+    timeoutId: null,
+  };
+
+  activeTabs.set(tabId, entry);
+  await saveActiveTabs();
+  scheduleTimeout(tabId, entry);
+}
+
+async function clearActiveTab(tabId) {
+  const entry = activeTabs.get(tabId);
+  if (!entry) return null;
+
+  clearEntryTimeout(entry);
+  activeTabs.delete(tabId);
+  await saveActiveTabs();
+  return entry;
+}
+
+async function ensureInitialized() {
+  await startupPromise;
+}
+
+async function initialize() {
+  await Promise.all([loadThreadTabs(), loadActiveTabs(), loadServerUrl()]);
+  await startPolling();
 }
 
 // --- Polling via chrome.alarms (survives service worker inactivity) ---
@@ -58,6 +152,9 @@ async function startPolling() {
 }
 
 async function pollServer() {
+  if (pollInFlight) return;
+  pollInFlight = true;
+
   try {
     const resp = await fetch(`${serverUrl}/pending`);
     if (resp.ok) {
@@ -81,6 +178,8 @@ async function pollServer() {
     }
   } catch {
     // Server not running — silently retry next poll
+  } finally {
+    pollInFlight = false;
   }
 
   // Supplement alarm with setTimeout for sub-minute responsiveness.
@@ -94,17 +193,15 @@ async function handleNewQuery(data) {
     const url = `https://www.google.com/search?q=${encodeURIComponent(data.query)}&udm=50`;
     const tab = await chrome.tabs.create({ url, active: false });
 
-    const timeoutId = setTimeout(
-      () => handleTimeout(tab.id, data.query_id, data.thread_id, false),
-      TAB_TIMEOUT
-    );
-    activeTabs.set(tab.id, {
-      queryId: data.query_id,
-      threadId: data.thread_id,
-      timeoutId,
-    });
     threadTabs.set(data.thread_id, tab.id);
-    await saveThreadTabs();
+    await Promise.all([
+      saveThreadTabs(),
+      trackActiveTab(tab.id, {
+        queryId: data.query_id,
+        threadId: data.thread_id,
+        isFollowUp: false,
+      }),
+    ]);
   } catch (err) {
     await postResult(data.query_id, {
       markdown: "",
@@ -115,6 +212,7 @@ async function handleNewQuery(data) {
 }
 
 async function handleFollowUp(data) {
+  await ensureInitialized();
   const tabId = threadTabs.get(data.thread_id);
 
   if (!tabId) {
@@ -140,14 +238,10 @@ async function handleFollowUp(data) {
     return;
   }
 
-  const timeoutId = setTimeout(
-    () => handleTimeout(tabId, data.query_id, data.thread_id, true),
-    TAB_TIMEOUT
-  );
-  activeTabs.set(tabId, {
+  await trackActiveTab(tabId, {
     queryId: data.query_id,
     threadId: data.thread_id,
-    timeoutId,
+    isFollowUp: true,
   });
 
   // Send follow-up to content script
@@ -168,8 +262,7 @@ async function handleFollowUp(data) {
       }).catch(() => {});
     }
   } catch {
-    clearTimeout(timeoutId);
-    activeTabs.delete(tabId);
+    await clearActiveTab(tabId);
     await postResult(data.query_id, {
       markdown: "",
       citations: [],
@@ -179,7 +272,7 @@ async function handleFollowUp(data) {
 }
 
 async function handleTimeout(tabId, queryId, threadId, isFollowUp) {
-  activeTabs.delete(tabId);
+  await clearActiveTab(tabId);
   try {
     await postResult(queryId, {
       markdown: "",
@@ -212,15 +305,12 @@ async function postResult(queryId, data) {
 }
 
 async function closeThread(threadId) {
+  await ensureInitialized();
   const tabId = threadTabs.get(threadId);
   threadTabs.delete(threadId);
   await saveThreadTabs();
   if (tabId) {
-    const entry = activeTabs.get(tabId);
-    if (entry) {
-      clearTimeout(entry.timeoutId);
-      activeTabs.delete(tabId);
-    }
+    await clearActiveTab(tabId);
     try {
       await chrome.tabs.remove(tabId);
     } catch {
@@ -232,35 +322,42 @@ async function closeThread(threadId) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type !== "AI_OVERVIEW_RESULT" || !sender.tab) return;
 
-  const tabId = sender.tab.id;
-  const entry = activeTabs.get(tabId);
-  if (!entry) return;
+  (async () => {
+    await ensureInitialized();
 
-  clearTimeout(entry.timeoutId);
-  activeTabs.delete(tabId);
+    const tabId = sender.tab.id;
+    const entry = await clearActiveTab(tabId);
+    if (!entry) {
+      console.warn("Missing active tab state for AI overview result", { tabId });
+      sendResponse({ received: false, error: "active_tab_not_found" });
+      return;
+    }
 
-  // Tab stays alive for follow-ups — do NOT close it
-  postResult(entry.queryId, message.data).catch(() => {});
+    // Tab stays alive for follow-ups — do NOT close it
+    await postResult(entry.queryId, message.data);
+    sendResponse({ received: true });
+  })().catch((error) => {
+    console.error("Failed to relay AI overview result", error);
+    sendResponse({ received: false, error: String(error) });
+  });
 
-  sendResponse({ received: true });
+  return true;
 });
 
 // Clean up maps when a tab is closed externally
 chrome.tabs.onRemoved.addListener((tabId) => {
-  const entry = activeTabs.get(tabId);
-  if (entry) {
-    // Notify server immediately so /ask doesn't hang until timeout
-    postResult(entry.queryId, {
-      markdown: "",
-      citations: [],
-      error: "tab_closed_externally",
-    }).catch(() => {});
-    clearTimeout(entry.timeoutId);
-    activeTabs.delete(tabId);
-    threadTabs.delete(entry.threadId);
-    saveThreadTabs();
-  }
+  (async () => {
+    await ensureInitialized();
+    const entry = await clearActiveTab(tabId);
+    if (entry) {
+      // Notify server immediately so /ask doesn't hang until timeout
+      await postResult(entry.queryId, {
+        markdown: "",
+        citations: [],
+        error: "tab_closed_externally",
+      }).catch(() => {});
+      threadTabs.delete(entry.threadId);
+      await saveThreadTabs();
+    }
+  })().catch(() => {});
 });
-
-// Initialize: load persisted state + server URL, then start polling
-Promise.all([loadThreadTabs(), loadServerUrl()]).then(() => startPolling());
