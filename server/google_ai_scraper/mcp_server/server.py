@@ -256,8 +256,8 @@ async def follow_up(query: str, thread_id: str) -> str:
 
 
 @mcp.tool()
-async def generate_image(prompt: str) -> Image:
-    """Generate an image using Google AI. Pass an image generation prompt. Returns the generated image. Requires the user to be logged into Google in the Chrome browser."""
+async def generate_image(prompt: str, save_path: str | None = None) -> list[Image | str]:
+    """Generate an image using Google AI. Pass an image generation prompt. Returns the generated image. Optionally saves to disk when save_path is provided (e.g. '/tmp/cat.png'). Requires the user to be logged into Google in the Chrome browser."""
     async with httpx.AsyncClient(base_url=SERVER_URL, timeout=IMAGE_REQUEST_TIMEOUT) as client:
         try:
             resp = await client.get("/generate_image", params={"prompt": prompt})
@@ -282,7 +282,15 @@ async def generate_image(prompt: str) -> Image:
 
     content_type = resp.headers.get("content-type", "image/png")
     fmt = content_type.split("/")[-1]  # "png", "jpeg", etc.
-    return Image(data=resp.content, format=fmt)
+    image = Image(data=resp.content, format=fmt)
+
+    if save_path:
+        out = Path(save_path).expanduser().resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(resp.content)
+        return [image, f"Image saved to {out}"]
+
+    return [image]
 
 
 @mcp.tool()
