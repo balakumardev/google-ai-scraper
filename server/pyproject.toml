@@ -1,6 +1,6 @@
 [project]
 name = "google-ai-scraper"
-version = "0.2.5"
+version = "0.2.6"
 description = "MCP server for scraping Google AI Overviews via a Chrome extension relay"
 requires-python = ">=3.10"
 license = "MIT"
