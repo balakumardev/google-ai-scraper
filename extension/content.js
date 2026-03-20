@@ -3,6 +3,98 @@
   const params = new URLSearchParams(window.location.search);
   if (params.get("udm") !== "50") return;
 
+  // --- Image generation pipeline (separate from text) ---
+  if (window.location.hash === "#_img") {
+    const IMAGE_MAX_WAIT = 160000; // 160s — image generation takes 1-2 min
+    const IMAGE_POLL_INTERVAL = 2000;
+    const IMAGE_STABILITY_DELAY = 5000;
+
+    function findGeneratedImages() {
+      const imgs = document.querySelectorAll('img[alt="AI generated image"]');
+      return Array.from(imgs).filter((img) => img.naturalWidth > 0);
+    }
+
+    async function fetchImageAsBase64(img) {
+      const resp = await fetch(img.src, { credentials: "include" });
+      if (!resp.ok) return null;
+      const blob = await resp.blob();
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result);
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    async function extractAndSendImages() {
+      let lastCount = 0;
+      let stableTimer = null;
+      let finished = false;
+
+      const finish = async (imgs) => {
+        if (finished) return;
+        finished = true;
+        clearInterval(pollTimer);
+        clearTimeout(maxTimer);
+        clearTimeout(stableTimer);
+        if (obs) obs.disconnect();
+
+        if (imgs.length === 0) {
+          chrome.runtime.sendMessage({
+            type: "AI_IMAGE_RESULT",
+            data: { images: [], error: "no_generated_image" },
+          });
+          return;
+        }
+
+        const base64Images = [];
+        for (const img of imgs) {
+          const data = await fetchImageAsBase64(img);
+          if (data) base64Images.push(data);
+        }
+
+        chrome.runtime.sendMessage({
+          type: "AI_IMAGE_RESULT",
+          data: {
+            images: base64Images,
+            error: base64Images.length === 0 ? "image_fetch_failed" : null,
+          },
+        });
+      };
+
+      const attempt = () => {
+        if (finished) return;
+        const imgs = findGeneratedImages();
+        if (imgs.length > 0 && imgs.length !== lastCount) {
+          lastCount = imgs.length;
+          clearTimeout(stableTimer);
+          stableTimer = setTimeout(() => finish(imgs), IMAGE_STABILITY_DELAY);
+        } else if (imgs.length > 0 && imgs.length === lastCount) {
+          // Same count — stability timer already running
+        }
+      };
+
+      const obs = new MutationObserver(attempt);
+      obs.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["src"],
+      });
+
+      const pollTimer = setInterval(attempt, IMAGE_POLL_INTERVAL);
+      const maxTimer = setTimeout(() => {
+        const imgs = findGeneratedImages();
+        finish(imgs);
+      }, IMAGE_MAX_WAIT);
+
+      attempt();
+    }
+
+    extractAndSendImages();
+    return; // Don't run text extraction
+  }
+
   const EXTRACTION_MAX_WAIT = 60000;
   const EXTRACTION_POLL_INTERVAL = 500;
   const EXTRACTION_STABILITY_DELAY = 3000;

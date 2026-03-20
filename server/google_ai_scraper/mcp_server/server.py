@@ -9,12 +9,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 15551
 SERVER_URL = os.environ.get("GOOGLE_AI_SCRAPER_URL", f"http://{DEFAULT_HOST}:{DEFAULT_PORT}")
 REQUEST_TIMEOUT = 75.0  # seconds — slightly above FastAPI query timeout
+IMAGE_REQUEST_TIMEOUT = 185.0  # seconds — image generation takes 1-2 min
 BACKEND_STARTUP_TIMEOUT = 10.0
 HEALTHCHECK_TIMEOUT = 1.5
 
@@ -252,6 +253,36 @@ async def follow_up(query: str, thread_id: str) -> str:
     """Continue a conversation in an existing thread. Use the thread_id from a previous search result."""
     result = await _request("GET", "/ask", params={"q": query, "thread_id": thread_id})
     return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def generate_image(prompt: str) -> Image:
+    """Generate an image using Google AI. Pass an image generation prompt. Returns the generated image. Requires the user to be logged into Google in the Chrome browser."""
+    async with httpx.AsyncClient(base_url=SERVER_URL, timeout=IMAGE_REQUEST_TIMEOUT) as client:
+        try:
+            resp = await client.get("/generate_image", params={"prompt": prompt})
+        except httpx.ConnectError:
+            if AUTO_MANAGE_SERVER and MANAGED_BACKEND_PORT is not None:
+                try:
+                    _ensure_local_backend(SERVER_URL, MANAGED_BACKEND_PORT)
+                    resp = await client.get("/generate_image", params={"prompt": prompt})
+                except Exception as exc:
+                    raise ValueError(f"Error: {exc}") from exc
+            else:
+                raise ValueError("Cannot connect to FastAPI server at " + SERVER_URL)
+        except httpx.ReadTimeout:
+            raise ValueError("Image generation timed out")
+
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        raise ValueError(f"Error ({resp.status_code}): {detail}")
+
+    content_type = resp.headers.get("content-type", "image/png")
+    fmt = content_type.split("/")[-1]  # "png", "jpeg", etc.
+    return Image(data=resp.content, format=fmt)
 
 
 @mcp.tool()

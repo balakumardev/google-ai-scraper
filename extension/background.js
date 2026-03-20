@@ -3,6 +3,7 @@ const POLL_INTERVAL = 1500;
 // 60s extraction budget + 8s buffer so background.js can return tab_timeout
 // before the FastAPI request-level timeout expires.
 const TAB_TIMEOUT = 68000;
+const IMAGE_TAB_TIMEOUT = 170000; // 170s — image generation takes 1-2 min
 const ALARM_NAME = "poll-server";
 
 let serverUrl = DEFAULT_SERVER;
@@ -175,7 +176,9 @@ async function pollServer() {
 
       // Dispatch query
       if (data.query_id && data.query) {
-        if (data.type === "follow_up") {
+        if (data.pipeline === "image") {
+          await handleImageQuery(data);
+        } else if (data.type === "follow_up") {
           await handleFollowUp(data);
         } else {
           await handleNewQuery(data);
@@ -351,13 +354,75 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
+// --- Image generation pipeline ---
+// Image tabs are fire-and-forget: no thread tracking, tab closes after result.
+
+const imageActiveTabs = new Map(); // Map<tabId, {queryId, timeoutId}>
+
+async function handleImageQuery(data) {
+  try {
+    const url = `https://www.google.com/search?q=${encodeURIComponent(data.query)}&udm=50&arv=1#_img`;
+    const tab = await chrome.tabs.create({ url, active: false });
+
+    const timeoutId = setTimeout(async () => {
+      imageActiveTabs.delete(tab.id);
+      await postImageResult(data.query_id, {
+        images: [],
+        error: "image_generation_timeout",
+      }).catch(() => {});
+      try { await chrome.tabs.remove(tab.id); } catch {}
+    }, IMAGE_TAB_TIMEOUT);
+
+    imageActiveTabs.set(tab.id, { queryId: data.query_id, timeoutId });
+  } catch (err) {
+    await postImageResult(data.query_id, {
+      images: [],
+      error: `tab_create_failed: ${err.message}`,
+    }).catch(() => {});
+  }
+}
+
+async function postImageResult(queryId, data) {
+  await fetch(`${serverUrl}/image_result/${queryId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type !== "AI_IMAGE_RESULT" || !sender.tab) return;
+
+  (async () => {
+    const tabId = sender.tab.id;
+    const entry = imageActiveTabs.get(tabId);
+    if (!entry) {
+      sendResponse({ received: false, error: "image_tab_not_found" });
+      return;
+    }
+
+    clearTimeout(entry.timeoutId);
+    imageActiveTabs.delete(tabId);
+    await postImageResult(entry.queryId, message.data);
+    sendResponse({ received: true });
+
+    // Close tab — image queries are one-shot
+    try { await chrome.tabs.remove(tabId); } catch {}
+  })().catch((error) => {
+    sendResponse({ received: false, error: String(error) });
+  });
+
+  return true;
+});
+
 // Clean up maps when a tab is closed externally
 chrome.tabs.onRemoved.addListener((tabId) => {
   (async () => {
     await ensureInitialized();
+
+    // Check text pipeline
     const entry = await clearActiveTab(tabId);
     if (entry) {
-      // Notify server immediately so /ask doesn't hang until timeout
       await postResult(entry.queryId, {
         markdown: "",
         citations: [],
@@ -365,6 +430,17 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       }).catch(() => {});
       threadTabs.delete(entry.threadId);
       await saveThreadTabs();
+    }
+
+    // Check image pipeline
+    const imgEntry = imageActiveTabs.get(tabId);
+    if (imgEntry) {
+      clearTimeout(imgEntry.timeoutId);
+      imageActiveTabs.delete(tabId);
+      await postImageResult(imgEntry.queryId, {
+        images: [],
+        error: "tab_closed_externally",
+      }).catch(() => {});
     }
   })().catch(() => {});
 });
