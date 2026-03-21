@@ -242,9 +242,23 @@ async def _request(method: str, path: str, **kwargs) -> dict:
 
 
 @mcp.tool()
-async def search(query: str) -> str:
-    """Search Google AI Overview. Returns markdown + citations + thread_id for follow-ups. Threads auto-expire after 2 min inactivity."""
-    result = await _request("GET", "/ask", params={"q": query})
+async def search(query: str, mode: str = "pro", authuser: int | None = None) -> str:
+    """Search Google AI Overview. Returns markdown + citations + thread_id for follow-ups. Threads auto-expire after 2 min inactivity.
+
+    Args:
+        query: The search query.
+        mode: "pro" (default) uses Google's advanced AI model for detailed, multi-source responses.
+              "fast" uses the standard AI model — faster but less detailed.
+              Use "fast" for simple fact lookups (definitions, dates, conversions).
+              Use "pro" for research, comparisons, or questions needing multiple sources.
+        authuser: Google account index (0, 1, 2, ...) to use for this search.
+                  If omitted, uses the account selected in the browser extension.
+                  On quota exhaustion, the extension auto-rotates through available accounts.
+    """
+    params = {"q": query, "mode": mode}
+    if authuser is not None:
+        params["authuser"] = authuser
+    result = await _request("GET", "/ask", params=params)
     return json.dumps(result, indent=2)
 
 

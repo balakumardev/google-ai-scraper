@@ -413,9 +413,20 @@
     attempt();
   }
 
+  function detectQuotaExhaustion(container) {
+    if (!container) return false;
+    const text = container.textContent || "";
+    return /you['']ve reached your daily limit/i.test(text);
+  }
+
   function tryExtractInitialOverview() {
     const container = findAIOverviewContainer();
     if (!container) return null;
+
+    if (detectQuotaExhaustion(container)) {
+      const q = new URLSearchParams(window.location.search).get("q") || "";
+      return { markdown: "", citations: [], error: "quota_exhausted_pro", _query: q };
+    }
 
     const { markdown, citations } = extractContent(container);
     return finalizeExtractionResult(
