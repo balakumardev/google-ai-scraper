@@ -341,6 +341,23 @@
     });
   }
 
+  function isTerminalExtractionError(error) {
+    return Boolean(
+      error &&
+      !error.startsWith("empty_") &&
+      !error.startsWith("no_ai_overview")
+    );
+  }
+
+  function buildQuotaExhaustedResult(query = "") {
+    return {
+      markdown: "",
+      citations: [],
+      error: "quota_exhausted_pro",
+      _query: query,
+    };
+  }
+
   function waitForExtraction(
     extractFn,
     onDone,
@@ -371,6 +388,11 @@
         const result = extractFn();
         if (!result) return;
         lastResult = result;
+
+        if (isTerminalExtractionError(result.error)) {
+          finish(result);
+          return;
+        }
 
         if (result.markdown.trim() || result.citations.length > 0) {
           const signature = extractionSignature(
@@ -425,7 +447,7 @@
 
     if (detectQuotaExhaustion(container)) {
       const q = new URLSearchParams(window.location.search).get("q") || "";
-      return { markdown: "", citations: [], error: "quota_exhausted_pro", _query: q };
+      return buildQuotaExhaustedResult(q);
     }
 
     const { markdown, citations } = extractContent(container);
@@ -454,18 +476,27 @@
     return extractContent(lastAimcContainer);
   }
 
-  function tryExtractFollowUp(prevMainColCount, prevSignature) {
+  function tryExtractFollowUp(prevMainColCount, prevSignature, query) {
     const allMainCols = document.querySelectorAll(
       '[data-container-id="main-col"]'
     );
 
     if (allMainCols.length === 0) {
+      const container = findAIOverviewContainer();
+      if (detectQuotaExhaustion(container)) {
+        return buildQuotaExhaustedResult(query);
+      }
       return null;
     }
 
     if (allMainCols.length > prevMainColCount) {
       // New main-col appeared — extract only from it
       const newMainCol = allMainCols[allMainCols.length - 1];
+      const newAimc =
+        newMainCol.closest('[data-subtree="aimc"]') || findAIOverviewContainer();
+      if (detectQuotaExhaustion(newAimc || newMainCol)) {
+        return buildQuotaExhaustedResult(query);
+      }
       const tempContainer = newMainCol.cloneNode(true);
 
       stripNonContentElements(tempContainer);
@@ -512,6 +543,13 @@
         citations,
         "empty_follow_up_extraction"
       );
+    }
+
+    const currentAimc =
+      allMainCols[allMainCols.length - 1]?.closest('[data-subtree="aimc"]') ||
+      findAIOverviewContainer();
+    if (detectQuotaExhaustion(currentAimc)) {
+      return buildQuotaExhaustedResult(query);
     }
 
     const { markdown, citations } = extractFollowUpSnapshot();
@@ -642,7 +680,7 @@
 
       // 5. Wait until the newly rendered follow-up is actually extractable.
       waitForExtraction(
-        () => tryExtractFollowUp(prevMainColCount, prevSignature),
+        () => tryExtractFollowUp(prevMainColCount, prevSignature, query),
         (result) => {
           sendResult(result);
           followUpInProgress = false;

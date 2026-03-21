@@ -1,3 +1,5 @@
+const GOOGLE_ACCOUNT_SCAN_LIMIT = 10;
+
 async function fetchGoogleAccounts() {
   // Find or create a google.com tab to make same-origin fetches
   let tab;
@@ -23,61 +25,85 @@ async function fetchGoogleAccounts() {
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: async () => {
+      args: [GOOGLE_ACCOUNT_SCAN_LIMIT],
+      func: async (scanLimit) => {
+        function parseAccount(html, index) {
+          const doc = new DOMParser().parseFromString(html, "text/html");
+          let email = "";
+          let name = "";
+          let photo = "";
+
+          const emailEl = doc.querySelector("[data-email]");
+          if (emailEl) {
+            email = (emailEl.getAttribute("data-email") || "").trim();
+          }
+
+          const labeledNodes = [...doc.querySelectorAll("[aria-label]")];
+          if (!email) {
+            for (const node of labeledNodes) {
+              const label = node.getAttribute("aria-label") || "";
+              const match = label.match(
+                /Google Account:\s*(.*?)\s*(?:\n|\r)\(([^)]+@[^)]+)\)/i
+              );
+              if (match) {
+                name = match[1].trim();
+                email = match[2].trim();
+                break;
+              }
+            }
+          }
+
+          if (!email) {
+            const emailMatch = html.match(
+              /[\w.+-]+@(?:gmail\.com|googlemail\.com|[\w.-]+\.[a-z]{2,})/i
+            );
+            if (emailMatch) {
+              email = emailMatch[0].trim();
+            }
+          }
+
+          if (!name && email) {
+            for (const node of labeledNodes) {
+              const label = node.getAttribute("aria-label") || "";
+              if (!label.includes(email)) continue;
+              const match = label.match(
+                /Google Account:\s*(.*?)(?:\s*(?:\n|\r)\(|$)/i
+              );
+              if (match) {
+                name = match[1].trim();
+                break;
+              }
+            }
+          }
+
+          const photoEl = doc.querySelector(
+            'img[src*="googleusercontent.com"], img[data-src*="googleusercontent.com"]'
+          );
+          if (photoEl) {
+            photo =
+              (photoEl.getAttribute("src") || photoEl.getAttribute("data-src") || "")
+                .trim();
+          }
+
+          if (!email) return null;
+          return { index, email, name, photo };
+        }
+
         const accounts = [];
-        // Probe authuser=0 through 9, stop at first miss
-        for (let i = 0; i < 10; i++) {
+        const seen = new Set();
+        for (let i = 0; i < scanLimit; i++) {
           try {
             const resp = await fetch(`https://www.google.com/search?q=test&authuser=${i}`, {
               credentials: "include",
               redirect: "follow",
             });
             const html = await resp.text();
-
-            // Look for email in the page — Google embeds it in aria-labels
-            // Pattern: "Google Account: Name\n(email@example.com)"
-            let email = null;
-            let name = "";
-            let photo = "";
-
-            // Pattern 1: aria-label with email
-            const ariaMatch = html.match(/aria-label="Google Account:\s*([^"]*?)\\n\(([^)]+@[^)]+)\)"/);
-            if (ariaMatch) {
-              name = ariaMatch[1].trim();
-              email = ariaMatch[2].trim();
-            }
-
-            // Pattern 2: data-email attribute
-            if (!email) {
-              const dataMatch = html.match(/data-email="([^"]+@[^"]+)"/);
-              if (dataMatch) email = dataMatch[1];
-            }
-
-            // Pattern 3: look for email in OGB account info
-            if (!email) {
-              const ogbMatch = html.match(/[\w.+-]+@(?:gmail\.com|googlemail\.com|[\w.-]+\.[\w]+)/);
-              if (ogbMatch) email = ogbMatch[0];
-            }
-
-            if (!email) {
-              // No account for this index — might mean no more accounts,
-              // but could also be a different page layout. Try one more.
-              if (accounts.length > 0) break;
-              continue;
-            }
-
-            // Extract photo URL
-            const photoMatch = html.match(/data-src="(https:\/\/lh3\.googleusercontent\.com\/[^"]+)"/);
-            if (photoMatch) photo = photoMatch[1];
-
-            if (!accounts.find(a => a.email === email)) {
-              accounts.push({ index: i, email, name, photo });
-            } else {
-              // Same account as before — no more unique accounts
-              break;
-            }
+            const account = parseAccount(html, i);
+            if (!account || seen.has(account.email)) continue;
+            seen.add(account.email);
+            accounts.push(account);
           } catch {
-            break;
+            // Keep scanning remaining indices in case only one slot fails.
           }
         }
         return accounts;
@@ -112,16 +138,25 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   // Persist full account list for background.js quota rotation
-  await chrome.storage.sync.set({ googleAccounts: accounts.map(a => a.index) });
+  const uniqueAccounts = [...new Map(accounts.map((account) => [account.email, account])).values()]
+    .sort((a, b) => a.index - b.index);
+  const accountIndices = uniqueAccounts.map((account) => account.index);
 
   const { googleAuthUser } = await chrome.storage.sync.get({ googleAuthUser: 0 });
+  const initialAuthUser = accountIndices.includes(googleAuthUser)
+    ? googleAuthUser
+    : accountIndices[0];
+  await chrome.storage.sync.set({
+    googleAuthUser: initialAuthUser,
+    googleAccounts: accountIndices,
+  });
 
   const list = document.createElement("ul");
   list.className = "account-list";
 
-  for (const acct of accounts) {
+  for (const acct of uniqueAccounts) {
     const li = document.createElement("li");
-    if (acct.index === googleAuthUser) li.classList.add("selected");
+    if (acct.index === initialAuthUser) li.classList.add("selected");
 
     const avatar = document.createElement("div");
     avatar.className = "avatar";

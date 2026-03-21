@@ -5,6 +5,7 @@ const POLL_INTERVAL = 1500;
 const TAB_TIMEOUT = 68000;
 const IMAGE_TAB_TIMEOUT = 170000; // 170s — image generation takes 1-2 min
 const ALARM_NAME = "poll-server";
+const GOOGLE_ACCOUNT_SCAN_LIMIT = 10;
 
 let serverUrl = DEFAULT_SERVER;
 let googleAuthUser = 0;
@@ -12,19 +13,237 @@ let googleAccounts = [0]; // available authuser indices for quota rotation
 
 // Map<tabId, {queryId, threadId, isFollowUp, deadlineAt, timeoutId}>
 const activeTabs = new Map();
-// Map<threadId, tabId> — also persisted to chrome.storage.session
+// Map<threadId, {tabId, authuser, fast}> — also persisted to chrome.storage.session
 let threadTabs = new Map();
 let pollInFlight = false;
 let isInitialized = false;
 const startupPromise = initialize();
+
+function normalizeAccountIndex(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isInteger(num) && num >= 0 ? num : fallback;
+}
+
+function normalizeAccountList(values) {
+  const list = Array.isArray(values)
+    ? values
+        .map((value) => normalizeAccountIndex(value, NaN))
+        .filter((value) => Number.isInteger(value) && value >= 0)
+    : [];
+  const unique = [...new Set(list)].sort((a, b) => a - b);
+  return unique.length > 0 ? unique : [0];
+}
+
+function coerceStoredAccountState(authuser, accounts) {
+  const normalizedAccounts = normalizeAccountList(accounts);
+  const fallbackAuthUser = normalizedAccounts[0] ?? 0;
+  const normalizedAuthUser = normalizeAccountIndex(authuser, fallbackAuthUser);
+  return {
+    authuser: normalizedAccounts.includes(normalizedAuthUser)
+      ? normalizedAuthUser
+      : fallbackAuthUser,
+    accounts: normalizedAccounts,
+  };
+}
+
+function setInMemoryAccountState(authuser, accounts) {
+  const nextState = coerceStoredAccountState(authuser, accounts);
+  googleAuthUser = nextState.authuser;
+  googleAccounts = nextState.accounts;
+  return nextState;
+}
+
+async function persistAccountState(authuser, accounts) {
+  const nextState = setInMemoryAccountState(authuser, accounts);
+  await chrome.storage.sync.set({
+    googleAuthUser: nextState.authuser,
+    googleAccounts: nextState.accounts,
+  });
+  return nextState;
+}
+
+function getDefaultAuthUser() {
+  if (googleAccounts.includes(googleAuthUser)) {
+    return googleAuthUser;
+  }
+  return googleAccounts[0] ?? 0;
+}
+
+function resolveSearchAuthUser(authuser = null) {
+  if (authuser === null || authuser === undefined) {
+    return getDefaultAuthUser();
+  }
+  return normalizeAccountIndex(authuser, getDefaultAuthUser());
+}
+
+function clearQueryRetryState(queryId) {
+  queryRetryState.delete(queryId);
+}
+
+function parseThreadTabRecord(value) {
+  if (typeof value === "number") {
+    return { tabId: value, authuser: 0, fast: false };
+  }
+  if (value && typeof value === "object") {
+    const tabId = Number(value.tabId);
+    if (!Number.isInteger(tabId)) return null;
+    return {
+      tabId,
+      authuser: normalizeAccountIndex(value.authuser, 0),
+      fast: Boolean(value.fast),
+    };
+  }
+  return null;
+}
+
+function findThreadIdByTabId(tabId) {
+  for (const [threadId, info] of threadTabs.entries()) {
+    if (info.tabId === tabId) return threadId;
+  }
+  return null;
+}
+
+async function withGoogleTab(run) {
+  let tab = null;
+  let createdTab = false;
+  const tabs = await chrome.tabs.query({ url: "https://www.google.com/*" });
+  if (tabs.length > 0) {
+    tab = tabs[0];
+  } else {
+    tab = await chrome.tabs.create({ url: "https://www.google.com/", active: false });
+    createdTab = true;
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        chrome.tabs.onUpdated.removeListener(listener);
+        clearTimeout(timeoutId);
+        resolve();
+      };
+      const listener = (tabId, info) => {
+        if (tabId === tab.id && info.status === "complete") {
+          finish();
+        }
+      };
+      const timeoutId = setTimeout(finish, 8000);
+      chrome.tabs.onUpdated.addListener(listener);
+    });
+  }
+
+  try {
+    return await run(tab);
+  } finally {
+    if (createdTab && tab?.id) {
+      try {
+        await chrome.tabs.remove(tab.id);
+      } catch {
+        // Tab may already be closed
+      }
+    }
+  }
+}
+
+async function probeGoogleAccounts(tabId) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    args: [GOOGLE_ACCOUNT_SCAN_LIMIT],
+    func: async (scanLimit) => {
+      function parseAccount(html, index) {
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        let email = "";
+        let name = "";
+
+        const emailEl = doc.querySelector("[data-email]");
+        if (emailEl) {
+          email = (emailEl.getAttribute("data-email") || "").trim();
+        }
+
+        const labeledNodes = [...doc.querySelectorAll("[aria-label]")];
+        if (!email) {
+          for (const node of labeledNodes) {
+            const label = node.getAttribute("aria-label") || "";
+            const match = label.match(
+              /Google Account:\s*(.*?)\s*(?:\n|\r)\(([^)]+@[^)]+)\)/i
+            );
+            if (match) {
+              name = match[1].trim();
+              email = match[2].trim();
+              break;
+            }
+          }
+        }
+
+        if (!email) {
+          const emailMatch = html.match(
+            /[\w.+-]+@(?:gmail\.com|googlemail\.com|[\w.-]+\.[a-z]{2,})/i
+          );
+          if (emailMatch) {
+            email = emailMatch[0].trim();
+          }
+        }
+
+        if (!name && email) {
+          for (const node of labeledNodes) {
+            const label = node.getAttribute("aria-label") || "";
+            if (!label.includes(email)) continue;
+            const match = label.match(/Google Account:\s*(.*?)(?:\s*(?:\n|\r)\(|$)/i);
+            if (match) {
+              name = match[1].trim();
+              break;
+            }
+          }
+        }
+
+        if (!email) return null;
+        return { index, email };
+      }
+
+      const accounts = [];
+      const seen = new Set();
+      for (let i = 0; i < scanLimit; i++) {
+        try {
+          const resp = await fetch(
+            `https://www.google.com/search?q=test&authuser=${i}`,
+            {
+              credentials: "include",
+              redirect: "follow",
+            }
+          );
+          const html = await resp.text();
+          const account = parseAccount(html, i);
+          if (!account || seen.has(account.email)) continue;
+          seen.add(account.email);
+          accounts.push(account);
+        } catch {
+          // Keep scanning remaining indices in case only one slot fails.
+        }
+      }
+      return accounts;
+    },
+  });
+
+  return results?.[0]?.result || [];
+}
+
+async function refreshGoogleAccounts() {
+  try {
+    const accounts = await withGoogleTab((tab) => probeGoogleAccounts(tab.id));
+    const detectedIndices = normalizeAccountList(accounts.map((account) => account.index));
+    await persistAccountState(getDefaultAuthUser(), detectedIndices);
+    return detectedIndices;
+  } catch (error) {
+    console.warn("Failed to refresh Google accounts", error);
+    return googleAccounts;
+  }
+}
 
 // --- Server URL from options ---
 
 async function loadServerUrl() {
   const data = await chrome.storage.sync.get({ serverUrl: DEFAULT_SERVER, googleAuthUser: 0, googleAccounts: [0] });
   serverUrl = data.serverUrl;
-  googleAuthUser = data.googleAuthUser;
-  googleAccounts = data.googleAccounts;
+  setInMemoryAccountState(data.googleAuthUser, data.googleAccounts);
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -32,11 +251,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (changes.serverUrl) {
       serverUrl = changes.serverUrl.newValue || DEFAULT_SERVER;
     }
-    if (changes.googleAuthUser != null) {
-      googleAuthUser = changes.googleAuthUser.newValue || 0;
-    }
-    if (changes.googleAccounts) {
-      googleAccounts = changes.googleAccounts.newValue || [0];
+    if (changes.googleAuthUser != null || changes.googleAccounts) {
+      setInMemoryAccountState(
+        changes.googleAuthUser ? changes.googleAuthUser.newValue : googleAuthUser,
+        changes.googleAccounts ? changes.googleAccounts.newValue : googleAccounts
+      );
     }
   }
 });
@@ -44,7 +263,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 function buildSearchUrl(query, { fast = false, authuser = null, extra = "" } = {}) {
   let url = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=50`;
   if (!fast) url += "&arv=1";
-  const au = authuser !== null ? authuser : googleAuthUser;
+  const au = resolveSearchAuthUser(authuser);
   if (au > 0) url += `&authuser=${au}`;
   if (extra) url += extra;
   return url;
@@ -55,7 +274,14 @@ function buildSearchUrl(query, { fast = false, authuser = null, extra = "" } = {
 // thread->tab mapping and the in-flight query->tab mapping in session storage.
 
 async function saveThreadTabs() {
-  const obj = Object.fromEntries(threadTabs);
+  const obj = {};
+  for (const [threadId, info] of threadTabs.entries()) {
+    obj[threadId] = {
+      tabId: info.tabId,
+      authuser: info.authuser,
+      fast: info.fast,
+    };
+  }
   await chrome.storage.session.set({ threadTabs: obj });
 }
 
@@ -64,8 +290,8 @@ async function loadThreadTabs() {
   if (data.threadTabs) {
     threadTabs = new Map(
       Object.entries(data.threadTabs)
-        .map(([threadId, tabId]) => [threadId, Number(tabId)])
-        .filter(([, tabId]) => Number.isInteger(tabId))
+        .map(([threadId, value]) => [threadId, parseThreadTabRecord(value)])
+        .filter(([, info]) => info !== null)
     );
   }
 }
@@ -76,6 +302,7 @@ function serializeActiveTabs() {
     obj[tabId] = {
       queryId: entry.queryId,
       threadId: entry.threadId,
+      query: entry.query,
       isFollowUp: entry.isFollowUp,
       authuser: entry.authuser,
       fast: entry.fast,
@@ -115,6 +342,7 @@ async function loadActiveTabs() {
     const entry = {
       queryId: persisted.queryId,
       threadId: persisted.threadId,
+      query: persisted.query ?? "",
       isFollowUp: Boolean(persisted.isFollowUp),
       authuser: persisted.authuser ?? null,
       fast: Boolean(persisted.fast),
@@ -126,13 +354,21 @@ async function loadActiveTabs() {
   }
 }
 
-async function trackActiveTab(tabId, { queryId, threadId, isFollowUp, authuser = null, fast = false }) {
+async function trackActiveTab(tabId, {
+  queryId,
+  threadId,
+  query,
+  isFollowUp,
+  authuser = null,
+  fast = false,
+}) {
   const existing = activeTabs.get(tabId);
   clearEntryTimeout(existing);
 
   const entry = {
     queryId,
     threadId,
+    query,
     isFollowUp,
     authuser,
     fast,
@@ -227,40 +463,50 @@ async function pollServer() {
   setTimeout(pollServer, POLL_INTERVAL);
 }
 
-// Per-query retry state for quota rotation: Map<queryId, { triedAuthUsers: Set<number>, triedFast: boolean }>
+// Per-query retry state for quota rotation:
+// Map<queryId, { triedAuthUsers: Set<number>, triedFast: boolean, refreshedAccounts: boolean }>
 const queryRetryState = new Map();
 
 async function handleNewQuery(data, { fast = false, authuser = null } = {}) {
   await ensureInitialized();
   try {
-    const url = buildSearchUrl(data.query, { fast, authuser });
+    const effectiveAuthUser = resolveSearchAuthUser(authuser);
+    const url = buildSearchUrl(data.query, { fast, authuser: effectiveAuthUser });
     const tab = await chrome.tabs.create({ url, active: false });
 
-    threadTabs.set(data.thread_id, tab.id);
+    threadTabs.set(data.thread_id, {
+      tabId: tab.id,
+      authuser: effectiveAuthUser,
+      fast,
+    });
     await Promise.all([
       saveThreadTabs(),
       trackActiveTab(tab.id, {
         queryId: data.query_id,
         threadId: data.thread_id,
+        query: data.query,
         isFollowUp: false,
-        authuser: authuser !== null ? authuser : googleAuthUser,
+        authuser: effectiveAuthUser,
         fast,
       }),
     ]);
+    return true;
   } catch (err) {
+    clearQueryRetryState(data.query_id);
     await postResult(data.query_id, {
       markdown: "",
       citations: [],
       error: `tab_create_failed: ${err.message}`,
     }).catch(() => {});
+    return false;
   }
 }
 
 async function handleFollowUp(data) {
   await ensureInitialized();
-  const tabId = threadTabs.get(data.thread_id);
+  const threadInfo = threadTabs.get(data.thread_id);
 
-  if (!tabId) {
+  if (!threadInfo) {
     await postResult(data.query_id, {
       markdown: "",
       citations: [],
@@ -271,7 +517,7 @@ async function handleFollowUp(data) {
 
   // Verify tab still exists
   try {
-    await chrome.tabs.get(tabId);
+    await chrome.tabs.get(threadInfo.tabId);
   } catch {
     threadTabs.delete(data.thread_id);
     await saveThreadTabs();
@@ -283,23 +529,27 @@ async function handleFollowUp(data) {
     return;
   }
 
-  await trackActiveTab(tabId, {
+  await trackActiveTab(threadInfo.tabId, {
     queryId: data.query_id,
     threadId: data.thread_id,
+    query: data.query,
     isFollowUp: true,
+    authuser: threadInfo.authuser,
+    fast: threadInfo.fast,
   });
 
   // Send follow-up to content script
   try {
-    const response = await chrome.tabs.sendMessage(tabId, {
+    const response = await chrome.tabs.sendMessage(threadInfo.tabId, {
       type: "FOLLOW_UP_QUERY",
       query: data.query,
       queryId: data.query_id,
     });
     // Content script rejected (e.g. follow_up_in_progress)
     if (response && response.received === false) {
-      const entry = await clearActiveTab(tabId);
+      const entry = await clearActiveTab(threadInfo.tabId);
       if (!entry) return;
+      clearQueryRetryState(data.query_id);
       await postResult(data.query_id, {
         markdown: "",
         citations: [],
@@ -307,7 +557,8 @@ async function handleFollowUp(data) {
       }).catch(() => {});
     }
   } catch {
-    await clearActiveTab(tabId);
+    await clearActiveTab(threadInfo.tabId);
+    clearQueryRetryState(data.query_id);
     await postResult(data.query_id, {
       markdown: "",
       citations: [],
@@ -318,6 +569,7 @@ async function handleFollowUp(data) {
 
 async function handleTimeout(tabId, queryId, threadId, isFollowUp) {
   await clearActiveTab(tabId);
+  clearQueryRetryState(queryId);
   try {
     await postResult(queryId, {
       markdown: "",
@@ -351,13 +603,16 @@ async function postResult(queryId, data) {
 
 async function closeThread(threadId) {
   await ensureInitialized();
-  const tabId = threadTabs.get(threadId);
+  const threadInfo = threadTabs.get(threadId);
   threadTabs.delete(threadId);
   await saveThreadTabs();
-  if (tabId) {
-    await clearActiveTab(tabId);
+  if (threadInfo) {
+    const entry = await clearActiveTab(threadInfo.tabId);
+    if (entry) {
+      clearQueryRetryState(entry.queryId);
+    }
     try {
-      await chrome.tabs.remove(tabId);
+      await chrome.tabs.remove(threadInfo.tabId);
     } catch {
       // Tab may already be closed
     }
@@ -382,35 +637,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.data?.error === "quota_exhausted_pro") {
       let state = queryRetryState.get(entry.queryId);
       if (!state) {
-        state = { triedAuthUsers: new Set(), triedFast: false };
+        state = { triedAuthUsers: new Set(), triedFast: false, refreshedAccounts: false };
         queryRetryState.set(entry.queryId, state);
       }
-      state.triedAuthUsers.add(entry.authuser ?? googleAuthUser);
+      state.triedAuthUsers.add(resolveSearchAuthUser(entry.authuser));
 
       // Close the current tab
       try { await chrome.tabs.remove(tabId); } catch {}
       threadTabs.delete(entry.threadId);
       await saveThreadTabs();
 
-      let query = message.data._query;
-      if (!query) {
-        try { query = new URL(sender.tab.url).searchParams.get("q"); } catch {}
+      let query = entry.query || message.data._query;
+      if (!query && sender.tab.url) {
+        try {
+          query = new URL(sender.tab.url).searchParams.get("q");
+        } catch {
+          // Ignore malformed URLs
+        }
       }
       if (!query) {
-        queryRetryState.delete(entry.queryId);
+        clearQueryRetryState(entry.queryId);
         await postResult(entry.queryId, { markdown: "", citations: [], error: "quota_exhausted_all_accounts" });
         sendResponse({ received: true });
         return;
       }
 
       // Try next untried account in pro mode
-      const nextAccount = googleAccounts.find(idx => !state.triedAuthUsers.has(idx));
+      let nextAccount = googleAccounts.find((idx) => !state.triedAuthUsers.has(idx));
+      if (nextAccount === undefined && !state.refreshedAccounts) {
+        state.refreshedAccounts = true;
+        const refreshedAccounts = await refreshGoogleAccounts();
+        nextAccount = refreshedAccounts.find((idx) => !state.triedAuthUsers.has(idx));
+      }
       if (nextAccount !== undefined && !entry.fast) {
         console.log(`Quota exhausted on authuser=${entry.authuser}, trying authuser=${nextAccount}`, entry.queryId);
-        await handleNewQuery(
+        const reopened = await handleNewQuery(
           { query_id: entry.queryId, thread_id: entry.threadId, query },
           { authuser: nextAccount }
         );
+        if (reopened) {
+          await persistAccountState(nextAccount, [...googleAccounts, nextAccount]);
+        }
         sendResponse({ received: true });
         return;
       }
@@ -428,13 +695,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       // Everything failed
-      queryRetryState.delete(entry.queryId);
+      clearQueryRetryState(entry.queryId);
       await postResult(entry.queryId, { markdown: "", citations: [], error: "quota_exhausted_all_accounts" });
       sendResponse({ received: true });
       return;
     }
 
     // Tab stays alive for follow-ups — do NOT close it
+    clearQueryRetryState(entry.queryId);
     await postResult(entry.queryId, message.data);
     sendResponse({ received: true });
   })().catch((error) => {
@@ -514,13 +782,21 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     // Check text pipeline
     const entry = await clearActiveTab(tabId);
     if (entry) {
+      clearQueryRetryState(entry.queryId);
       await postResult(entry.queryId, {
         markdown: "",
         citations: [],
         error: "tab_closed_externally",
       }).catch(() => {});
-      threadTabs.delete(entry.threadId);
-      await saveThreadTabs();
+      if (threadTabs.delete(entry.threadId)) {
+        await saveThreadTabs();
+      }
+    } else {
+      const threadId = findThreadIdByTabId(tabId);
+      if (threadId) {
+        threadTabs.delete(threadId);
+        await saveThreadTabs();
+      }
     }
 
     // Check image pipeline
