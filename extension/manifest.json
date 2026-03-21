@@ -3,10 +3,9 @@
   "name": "Google AI Overview Scraper",
   "version": "2.4",
   "description": "Extracts Google AI Overviews as structured markdown via a local MCP server",
-  "permissions": ["tabs", "scripting", "alarms", "storage", "cookies"],
+  "permissions": ["tabs", "scripting", "alarms", "storage"],
   "host_permissions": [
     "https://www.google.com/*",
-    "https://accounts.google.com/*",
     "http://localhost/*"
   ],
   "icons": {
