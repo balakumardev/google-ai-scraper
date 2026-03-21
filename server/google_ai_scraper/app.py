@@ -27,13 +27,15 @@ class Thread:
 
 
 class PendingQuery:
-    __slots__ = ("query_id", "query", "event", "result", "thread_id", "query_type")
+    __slots__ = ("query_id", "query", "event", "result", "thread_id", "query_type", "mode", "authuser")
 
-    def __init__(self, query: str, thread_id: str | None = None):
+    def __init__(self, query: str, thread_id: str | None = None, mode: str = "pro", authuser: int | None = None):
         self.query_id: str = uuid.uuid4().hex[:12]
         self.query: str = query
         self.event: asyncio.Event = asyncio.Event()
         self.result: dict | None = None
+        self.mode: str = mode
+        self.authuser: int | None = authuser
         if thread_id:
             self.thread_id = thread_id
             self.query_type = "follow_up"
@@ -143,9 +145,11 @@ async def health():
 
 
 @app.get("/ask")
-async def ask(q: str, thread_id: str | None = None, close_thread: bool = False):
+async def ask(q: str, thread_id: str | None = None, close_thread: bool = False, mode: str = "pro", authuser: int | None = None):
     if not q.strip():
         raise HTTPException(400, "query is required")
+    if mode not in ("fast", "pro"):
+        raise HTTPException(400, "mode must be 'fast' or 'pro'")
 
     _check_extension_connected()
 
@@ -160,7 +164,7 @@ async def ask(q: str, thread_id: str | None = None, close_thread: bool = False):
     else:
         thread = None
 
-    pq = PendingQuery(q.strip(), thread_id)
+    pq = PendingQuery(q.strip(), thread_id, mode=mode, authuser=authuser)
 
     # Create new thread if this is a new query
     if not thread_id:
@@ -215,6 +219,8 @@ async def get_pending():
             "thread_id": pq.thread_id,
             "type": pq.query_type,
             "pipeline": "text",
+            "mode": pq.mode,
+            "authuser": pq.authuser,
             "close_threads": threads_to_close,
         }
 

@@ -7,6 +7,8 @@ const IMAGE_TAB_TIMEOUT = 170000; // 170s — image generation takes 1-2 min
 const ALARM_NAME = "poll-server";
 
 let serverUrl = DEFAULT_SERVER;
+let googleAuthUser = 0;
+let googleAccounts = [0]; // available authuser indices for quota rotation
 
 // Map<tabId, {queryId, threadId, isFollowUp, deadlineAt, timeoutId}>
 const activeTabs = new Map();
@@ -19,15 +21,34 @@ const startupPromise = initialize();
 // --- Server URL from options ---
 
 async function loadServerUrl() {
-  const { serverUrl: url } = await chrome.storage.sync.get({ serverUrl: DEFAULT_SERVER });
-  serverUrl = url;
+  const data = await chrome.storage.sync.get({ serverUrl: DEFAULT_SERVER, googleAuthUser: 0, googleAccounts: [0] });
+  serverUrl = data.serverUrl;
+  googleAuthUser = data.googleAuthUser;
+  googleAccounts = data.googleAccounts;
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "sync" && changes.serverUrl) {
-    serverUrl = changes.serverUrl.newValue || DEFAULT_SERVER;
+  if (area === "sync") {
+    if (changes.serverUrl) {
+      serverUrl = changes.serverUrl.newValue || DEFAULT_SERVER;
+    }
+    if (changes.googleAuthUser != null) {
+      googleAuthUser = changes.googleAuthUser.newValue || 0;
+    }
+    if (changes.googleAccounts) {
+      googleAccounts = changes.googleAccounts.newValue || [0];
+    }
   }
 });
+
+function buildSearchUrl(query, { fast = false, authuser = null, extra = "" } = {}) {
+  let url = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=50`;
+  if (!fast) url += "&arv=1";
+  const au = authuser !== null ? authuser : googleAuthUser;
+  if (au > 0) url += `&authuser=${au}`;
+  if (extra) url += extra;
+  return url;
+}
 
 // --- Persistence for threadTabs + activeTabs ---
 // MV3 service workers can restart at any time, so keep both the persistent
@@ -56,6 +77,8 @@ function serializeActiveTabs() {
       queryId: entry.queryId,
       threadId: entry.threadId,
       isFollowUp: entry.isFollowUp,
+      authuser: entry.authuser,
+      fast: entry.fast,
       deadlineAt: entry.deadlineAt,
     };
   }
@@ -93,6 +116,8 @@ async function loadActiveTabs() {
       queryId: persisted.queryId,
       threadId: persisted.threadId,
       isFollowUp: Boolean(persisted.isFollowUp),
+      authuser: persisted.authuser ?? null,
+      fast: Boolean(persisted.fast),
       deadlineAt: Number(persisted.deadlineAt) || Date.now(),
       timeoutId: null,
     };
@@ -101,7 +126,7 @@ async function loadActiveTabs() {
   }
 }
 
-async function trackActiveTab(tabId, { queryId, threadId, isFollowUp }) {
+async function trackActiveTab(tabId, { queryId, threadId, isFollowUp, authuser = null, fast = false }) {
   const existing = activeTabs.get(tabId);
   clearEntryTimeout(existing);
 
@@ -109,6 +134,8 @@ async function trackActiveTab(tabId, { queryId, threadId, isFollowUp }) {
     queryId,
     threadId,
     isFollowUp,
+    authuser,
+    fast,
     deadlineAt: Date.now() + TAB_TIMEOUT,
     timeoutId: null,
   };
@@ -181,7 +208,10 @@ async function pollServer() {
         } else if (data.type === "follow_up") {
           await handleFollowUp(data);
         } else {
-          await handleNewQuery(data);
+          await handleNewQuery(data, {
+            fast: data.mode === "fast",
+            authuser: data.authuser !== undefined && data.authuser !== null ? data.authuser : null,
+          });
         }
       }
     }
@@ -197,10 +227,13 @@ async function pollServer() {
   setTimeout(pollServer, POLL_INTERVAL);
 }
 
-async function handleNewQuery(data) {
+// Per-query retry state for quota rotation: Map<queryId, { triedAuthUsers: Set<number>, triedFast: boolean }>
+const queryRetryState = new Map();
+
+async function handleNewQuery(data, { fast = false, authuser = null } = {}) {
   await ensureInitialized();
   try {
-    const url = `https://www.google.com/search?q=${encodeURIComponent(data.query)}&udm=50&arv=1`;
+    const url = buildSearchUrl(data.query, { fast, authuser });
     const tab = await chrome.tabs.create({ url, active: false });
 
     threadTabs.set(data.thread_id, tab.id);
@@ -210,6 +243,8 @@ async function handleNewQuery(data) {
         queryId: data.query_id,
         threadId: data.thread_id,
         isFollowUp: false,
+        authuser: authuser !== null ? authuser : googleAuthUser,
+        fast,
       }),
     ]);
   } catch (err) {
@@ -343,6 +378,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
 
+    // Quota exhausted — rotate to next account, then fall back to fast mode
+    if (message.data?.error === "quota_exhausted_pro") {
+      let state = queryRetryState.get(entry.queryId);
+      if (!state) {
+        state = { triedAuthUsers: new Set(), triedFast: false };
+        queryRetryState.set(entry.queryId, state);
+      }
+      state.triedAuthUsers.add(entry.authuser ?? googleAuthUser);
+
+      // Close the current tab
+      try { await chrome.tabs.remove(tabId); } catch {}
+      threadTabs.delete(entry.threadId);
+      await saveThreadTabs();
+
+      let query = message.data._query;
+      if (!query) {
+        try { query = new URL(sender.tab.url).searchParams.get("q"); } catch {}
+      }
+      if (!query) {
+        queryRetryState.delete(entry.queryId);
+        await postResult(entry.queryId, { markdown: "", citations: [], error: "quota_exhausted_all_accounts" });
+        sendResponse({ received: true });
+        return;
+      }
+
+      // Try next untried account in pro mode
+      const nextAccount = googleAccounts.find(idx => !state.triedAuthUsers.has(idx));
+      if (nextAccount !== undefined && !entry.fast) {
+        console.log(`Quota exhausted on authuser=${entry.authuser}, trying authuser=${nextAccount}`, entry.queryId);
+        await handleNewQuery(
+          { query_id: entry.queryId, thread_id: entry.threadId, query },
+          { authuser: nextAccount }
+        );
+        sendResponse({ received: true });
+        return;
+      }
+
+      // All accounts exhausted in pro mode — try fast mode (once)
+      if (!state.triedFast) {
+        state.triedFast = true;
+        console.log("All accounts exhausted on Pro, trying fast mode", entry.queryId);
+        await handleNewQuery(
+          { query_id: entry.queryId, thread_id: entry.threadId, query },
+          { fast: true }
+        );
+        sendResponse({ received: true });
+        return;
+      }
+
+      // Everything failed
+      queryRetryState.delete(entry.queryId);
+      await postResult(entry.queryId, { markdown: "", citations: [], error: "quota_exhausted_all_accounts" });
+      sendResponse({ received: true });
+      return;
+    }
+
     // Tab stays alive for follow-ups — do NOT close it
     await postResult(entry.queryId, message.data);
     sendResponse({ received: true });
@@ -361,7 +452,7 @@ const imageActiveTabs = new Map(); // Map<tabId, {queryId, timeoutId}>
 
 async function handleImageQuery(data) {
   try {
-    const url = `https://www.google.com/search?q=${encodeURIComponent(data.query)}&udm=50&arv=1#_img`;
+    const url = buildSearchUrl(data.query, { extra: "#_img" });
     const tab = await chrome.tabs.create({ url, active: false });
 
     const timeoutId = setTimeout(async () => {
