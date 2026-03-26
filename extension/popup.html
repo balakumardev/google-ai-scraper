@@ -1,36 +1,46 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <style>
-    body { font-family: system-ui, sans-serif; padding: 12px 16px; min-width: 280px; margin: 0; }
-    h3 { margin: 0 0 10px; font-size: 14px; color: #333; }
-    .account-list { list-style: none; padding: 0; margin: 0; }
-    .account-list li {
-      display: flex; align-items: center; gap: 8px;
-      padding: 8px 10px; border-radius: 6px; cursor: pointer;
-      border: 1px solid transparent; margin-bottom: 4px;
-    }
-    .account-list li:hover { background: #f0f4ff; }
-    .account-list li.selected { border-color: #1a73e8; background: #e8f0fe; }
-    .avatar {
-      width: 28px; height: 28px; border-radius: 50%;
-      background: #dadce0; display: flex; align-items: center;
-      justify-content: center; font-size: 13px; color: #5f6368;
-      flex-shrink: 0; overflow: hidden;
-    }
-    .avatar img { width: 100%; height: 100%; object-fit: cover; }
-    .account-info { min-width: 0; }
-    .account-name { font-size: 13px; font-weight: 500; color: #202124; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .account-email { font-size: 11px; color: #5f6368; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .status { font-size: 12px; color: #188038; margin-top: 8px; min-height: 16px; }
-    .error { color: #d93025; }
-    .loading { color: #5f6368; font-size: 13px; padding: 16px 0; text-align: center; }
-  </style>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <h3>Search as account</h3>
-  <div id="content"><div class="loading">Loading accounts…</div></div>
-  <div id="status" class="status"></div>
+  <main class="shell">
+    <section class="panel">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Google AI Scraper</p>
+          <h1 class="title">Search account</h1>
+          <p class="subtitle">Choose the Google profile used for searches, while keeping refreshes fast with a local cache.</p>
+        </div>
+        <div class="toolbar">
+          <button id="refreshButton" class="toolbar-button" type="button">Refresh</button>
+          <button id="settingsButton" class="toolbar-button secondary" type="button">Settings</button>
+        </div>
+      </header>
+
+      <div class="meta-row">
+        <span id="connectionPill" class="pill tone-pending">Checking server</span>
+        <span id="cachePill" class="pill tone-neutral">No cached accounts</span>
+      </div>
+      <p id="healthDetail" class="health-detail">Verifying the local relay and extension heartbeat.</p>
+
+      <section id="summaryCard" class="summary-card" hidden>
+        <div id="selectedAvatar" class="avatar">A</div>
+        <div>
+          <div class="summary-label">Active account</div>
+          <div id="selectedName" class="summary-name"></div>
+          <div id="selectedEmail" class="summary-email"></div>
+          <div id="summaryMeta" class="summary-meta"></div>
+        </div>
+      </section>
+
+      <div id="banner" class="banner" hidden></div>
+
+      <div id="content" class="content"></div>
+      <div id="status" class="status tone-neutral" aria-live="polite"></div>
+    </section>
+  </main>
   <script src="popup.js"></script>
 </body>
 </html>

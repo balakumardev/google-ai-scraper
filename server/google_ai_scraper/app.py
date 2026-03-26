@@ -11,9 +11,9 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 THREAD_TTL = 120  # seconds of inactivity before auto-cleanup
-EXTENSION_STALE_THRESHOLD = 5.0  # seconds — extension polls every 1.5s
-QUERY_TIMEOUT = 70.0  # seconds — above background tab timeout to preserve explicit tab_timeout errors
-IMAGE_QUERY_TIMEOUT = 180.0  # seconds — image generation takes 1-2 min
+EXTENSION_RECENT_POLL_THRESHOLD = 75.0  # MV3 workers can sleep between alarm wakeups
+QUERY_TIMEOUT = 110.0  # seconds — covers MV3 wake latency plus background tab timeout
+IMAGE_QUERY_TIMEOUT = 220.0  # seconds — covers MV3 wake latency plus image generation
 
 
 class Thread:
@@ -115,23 +115,37 @@ class ImageResultPayload(BaseModel):
     error: str | None = None
 
 
-def _check_extension_connected():
+def _extension_poll_snapshot() -> tuple[str, float | None]:
     if last_poll_time == 0:
-        raise HTTPException(
-            503,
-            "Browser extension not connected. Start Chrome, install the extension from https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en, and set the extension's server URL to this server. The extension must be polling for requests to work.",
-        )
+        return "never_seen", None
+
     poll_age = time.monotonic() - last_poll_time
-    if poll_age > EXTENSION_STALE_THRESHOLD:
-        raise HTTPException(
-            503,
-            f"Browser extension disconnected (no poll for {poll_age:.0f}s). Check that Chrome is running, the extension is enabled, and its server URL matches this server.",
-        )
+    if poll_age <= EXTENSION_RECENT_POLL_THRESHOLD:
+        return "connected", poll_age
+    return "stale", poll_age
+
+
+def _extension_timeout_message() -> str:
+    extension_status, poll_age = _extension_poll_snapshot()
+    base_message = (
+        "Browser extension did not respond in time. "
+        "Make sure Edge, Chrome, or another Chromium browser is open, the extension is enabled, "
+        "and its server URL matches this server."
+    )
+
+    if extension_status == "never_seen":
+        return base_message
+
+    return (
+        f"{base_message} Last poll was {poll_age:.0f}s ago, "
+        "so the Manifest V3 background worker may be idle. "
+        "Retry in a few seconds if the browser is already open."
+    )
 
 
 @app.get("/health")
 async def health():
-    poll_age = (time.monotonic() - last_poll_time) if last_poll_time else None
+    extension_status, poll_age = _extension_poll_snapshot()
     return {
         "status": "ok",
         "pending": len(pending_queries),
@@ -139,8 +153,10 @@ async def health():
         "active_threads": len(active_threads),
         "pending_images": len(pending_image_queries),
         "image_queue": len(image_queue),
-        "extension_connected": poll_age is not None and poll_age <= EXTENSION_STALE_THRESHOLD,
+        "extension_connected": extension_status == "connected",
+        "extension_status": extension_status,
         "last_poll_age_seconds": round(poll_age, 1) if poll_age is not None else None,
+        "extension_recent_poll_threshold_seconds": EXTENSION_RECENT_POLL_THRESHOLD,
     }
 
 
@@ -150,8 +166,6 @@ async def ask(q: str, thread_id: str | None = None, close_thread: bool = False, 
         raise HTTPException(400, "query is required")
     if mode not in ("fast", "pro"):
         raise HTTPException(400, "mode must be 'fast' or 'pro'")
-
-    _check_extension_connected()
 
     # Thread validation
     if thread_id:
@@ -178,7 +192,7 @@ async def ask(q: str, thread_id: str | None = None, close_thread: bool = False, 
     try:
         await asyncio.wait_for(pq.event.wait(), timeout=QUERY_TIMEOUT)
     except asyncio.TimeoutError:
-        raise HTTPException(504, "extension did not respond in time")
+        raise HTTPException(504, _extension_timeout_message())
     finally:
         pending_queries.pop(pq.query_id, None)
         try:
@@ -260,8 +274,6 @@ async def generate_image(prompt: str):
     if not prompt.strip():
         raise HTTPException(400, "prompt is required")
 
-    _check_extension_connected()
-
     iq = PendingImageQuery(prompt.strip())
     pending_image_queries[iq.query_id] = iq
     image_queue.append(iq)
@@ -269,7 +281,7 @@ async def generate_image(prompt: str):
     try:
         await asyncio.wait_for(iq.event.wait(), timeout=IMAGE_QUERY_TIMEOUT)
     except asyncio.TimeoutError:
-        raise HTTPException(504, "image generation timed out (extension did not respond)")
+        raise HTTPException(504, _extension_timeout_message())
     finally:
         pending_image_queries.pop(iq.query_id, None)
         try:

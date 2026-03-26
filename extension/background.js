@@ -1,15 +1,22 @@
 const DEFAULT_SERVER = "http://localhost:15551";
 const POLL_INTERVAL = 1500;
+const ALARM_WAKE_INTERVAL_MINUTES = 0.5;
 // 60s extraction budget + 8s buffer so background.js can return tab_timeout
 // before the FastAPI request-level timeout expires.
 const TAB_TIMEOUT = 68000;
 const IMAGE_TAB_TIMEOUT = 170000; // 170s — image generation takes 1-2 min
 const ALARM_NAME = "poll-server";
 const GOOGLE_ACCOUNT_SCAN_LIMIT = 10;
+const GOOGLE_ACCOUNT_CACHE_TTL = 12 * 60 * 60 * 1000;
+const SERVER_HEALTH_TIMEOUT = 3000;
 
 let serverUrl = DEFAULT_SERVER;
 let googleAuthUser = 0;
 let googleAccounts = [0]; // available authuser indices for quota rotation
+let googleAccountProfiles = [];
+let googleAccountsUpdatedAt = 0;
+let googleAccountsLastError = "";
+let accountRefreshInFlight = null;
 
 // Map<tabId, {queryId, threadId, isFollowUp, deadlineAt, timeoutId}>
 const activeTabs = new Map();
@@ -34,6 +41,58 @@ function normalizeAccountList(values) {
   return unique.length > 0 ? unique : [0];
 }
 
+function normalizeTimestamp(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 ? num : fallback;
+}
+
+function sanitizeText(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeAccountProfile(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const index = normalizeAccountIndex(value.index, NaN);
+  const email = sanitizeText(value.email);
+  if (!Number.isInteger(index) || index < 0 || !email) {
+    return null;
+  }
+
+  return {
+    index,
+    email,
+    name: sanitizeText(value.name),
+    photo: sanitizeText(value.photo),
+  };
+}
+
+function normalizeAccountProfiles(values) {
+  const deduped = new Map();
+
+  for (const value of Array.isArray(values) ? values : []) {
+    const account = normalizeAccountProfile(value);
+    if (!account) continue;
+
+    const existing = deduped.get(account.email);
+    if (!existing) {
+      deduped.set(account.email, account);
+      continue;
+    }
+
+    deduped.set(account.email, {
+      index: Math.min(existing.index, account.index),
+      email: account.email,
+      name: existing.name || account.name,
+      photo: existing.photo || account.photo,
+    });
+  }
+
+  return [...deduped.values()].sort((a, b) => a.index - b.index);
+}
+
 function coerceStoredAccountState(authuser, accounts) {
   const normalizedAccounts = normalizeAccountList(accounts);
   const fallbackAuthUser = normalizedAccounts[0] ?? 0;
@@ -51,6 +110,14 @@ function setInMemoryAccountState(authuser, accounts) {
   googleAuthUser = nextState.authuser;
   googleAccounts = nextState.accounts;
   return nextState;
+}
+
+function setInMemoryAccountProfiles(profiles, updatedAt = 0) {
+  googleAccountProfiles = normalizeAccountProfiles(profiles);
+  googleAccountsUpdatedAt = normalizeTimestamp(
+    updatedAt,
+    googleAccountProfiles.length > 0 ? Date.now() : 0
+  );
 }
 
 async function persistAccountState(authuser, accounts) {
@@ -74,6 +141,59 @@ function resolveSearchAuthUser(authuser = null) {
     return getDefaultAuthUser();
   }
   return normalizeAccountIndex(authuser, getDefaultAuthUser());
+}
+
+function getSelectedAccountProfile() {
+  const selectedAuthUser = getDefaultAuthUser();
+  return (
+    googleAccountProfiles.find((account) => account.index === selectedAuthUser) ||
+    googleAccountProfiles[0] ||
+    null
+  );
+}
+
+function isAccountCacheStale() {
+  if (!googleAccountsUpdatedAt) {
+    return true;
+  }
+  return Date.now() - googleAccountsUpdatedAt > GOOGLE_ACCOUNT_CACHE_TTL;
+}
+
+function buildPopupState() {
+  return {
+    authuser: getDefaultAuthUser(),
+    accounts: googleAccountProfiles,
+    selectedAccount: getSelectedAccountProfile(),
+    accountsUpdatedAt: googleAccountsUpdatedAt || null,
+    accountsLastError: googleAccountsLastError || null,
+    accountsStale: isAccountCacheStale(),
+    isRefreshingAccounts: accountRefreshInFlight !== null,
+    serverUrl,
+  };
+}
+
+async function persistAccountProfiles(profiles, selectedAuthUser = getDefaultAuthUser()) {
+  const normalizedProfiles = normalizeAccountProfiles(profiles);
+  const accountIndices = normalizedProfiles.map((account) => account.index);
+  if (accountIndices.length > 0) {
+    await persistAccountState(selectedAuthUser, accountIndices);
+  }
+
+  setInMemoryAccountProfiles(normalizedProfiles, Date.now());
+  googleAccountsLastError = "";
+
+  await chrome.storage.local.set({
+    googleAccountProfiles,
+    googleAccountsUpdatedAt,
+    googleAccountsLastError,
+  });
+
+  return normalizedProfiles;
+}
+
+async function persistAccountRefreshError(message) {
+  googleAccountsLastError = sanitizeText(message);
+  await chrome.storage.local.set({ googleAccountsLastError });
 }
 
 function clearQueryRetryState(queryId) {
@@ -153,6 +273,7 @@ async function probeGoogleAccounts(tabId) {
         const doc = new DOMParser().parseFromString(html, "text/html");
         let email = "";
         let name = "";
+        let photo = "";
 
         const emailEl = doc.querySelector("[data-email]");
         if (emailEl) {
@@ -195,8 +316,19 @@ async function probeGoogleAccounts(tabId) {
           }
         }
 
+        const photoEl = doc.querySelector(
+          'img[src*="googleusercontent.com"], img[data-src*="googleusercontent.com"]'
+        );
+        if (photoEl) {
+          photo = (
+            photoEl.getAttribute("src") ||
+            photoEl.getAttribute("data-src") ||
+            ""
+          ).trim();
+        }
+
         if (!email) return null;
-        return { index, email };
+        return { index, email, name, photo };
       }
 
       const accounts = [];
@@ -226,24 +358,69 @@ async function probeGoogleAccounts(tabId) {
   return results?.[0]?.result || [];
 }
 
-async function refreshGoogleAccounts() {
-  try {
-    const accounts = await withGoogleTab((tab) => probeGoogleAccounts(tab.id));
-    const detectedIndices = normalizeAccountList(accounts.map((account) => account.index));
-    await persistAccountState(getDefaultAuthUser(), detectedIndices);
-    return detectedIndices;
-  } catch (error) {
-    console.warn("Failed to refresh Google accounts", error);
-    return googleAccounts;
+async function refreshGoogleAccounts({ force = false } = {}) {
+  if (
+    !force &&
+    googleAccountProfiles.length > 0 &&
+    !isAccountCacheStale()
+  ) {
+    return googleAccountProfiles;
   }
+
+  if (accountRefreshInFlight) {
+    return accountRefreshInFlight;
+  }
+
+  accountRefreshInFlight = (async () => {
+    try {
+      const accounts = await withGoogleTab((tab) => probeGoogleAccounts(tab.id));
+      const profiles = normalizeAccountProfiles(accounts);
+      if (profiles.length === 0) {
+        await persistAccountRefreshError("No Google accounts found. Sign in to Google first.");
+        return googleAccountProfiles;
+      }
+
+      await persistAccountProfiles(profiles, getDefaultAuthUser());
+      return googleAccountProfiles;
+    } catch (error) {
+      console.warn("Failed to refresh Google accounts", error);
+      const message =
+        error && typeof error.message === "string"
+          ? error.message
+          : "Failed to refresh Google accounts";
+      await persistAccountRefreshError(message);
+      return googleAccountProfiles;
+    } finally {
+      accountRefreshInFlight = null;
+    }
+  })();
+
+  return accountRefreshInFlight;
 }
 
 // --- Server URL from options ---
 
-async function loadServerUrl() {
-  const data = await chrome.storage.sync.get({ serverUrl: DEFAULT_SERVER, googleAuthUser: 0, googleAccounts: [0] });
-  serverUrl = data.serverUrl;
-  setInMemoryAccountState(data.googleAuthUser, data.googleAccounts);
+async function loadStoredState() {
+  const [syncData, localData] = await Promise.all([
+    chrome.storage.sync.get({
+      serverUrl: DEFAULT_SERVER,
+      googleAuthUser: 0,
+      googleAccounts: [0],
+    }),
+    chrome.storage.local.get({
+      googleAccountProfiles: [],
+      googleAccountsUpdatedAt: 0,
+      googleAccountsLastError: "",
+    }),
+  ]);
+
+  serverUrl = syncData.serverUrl;
+  setInMemoryAccountState(syncData.googleAuthUser, syncData.googleAccounts);
+  setInMemoryAccountProfiles(
+    localData.googleAccountProfiles,
+    localData.googleAccountsUpdatedAt
+  );
+  googleAccountsLastError = sanitizeText(localData.googleAccountsLastError);
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -257,8 +434,50 @@ chrome.storage.onChanged.addListener((changes, area) => {
         changes.googleAccounts ? changes.googleAccounts.newValue : googleAccounts
       );
     }
+    return;
+  }
+
+  if (area === "local") {
+    if (changes.googleAccountProfiles || changes.googleAccountsUpdatedAt) {
+      setInMemoryAccountProfiles(
+        changes.googleAccountProfiles
+          ? changes.googleAccountProfiles.newValue
+          : googleAccountProfiles,
+        changes.googleAccountsUpdatedAt
+          ? changes.googleAccountsUpdatedAt.newValue
+          : googleAccountsUpdatedAt
+      );
+    }
+    if (changes.googleAccountsLastError) {
+      googleAccountsLastError = sanitizeText(
+        changes.googleAccountsLastError.newValue
+      );
+    }
   }
 });
+
+async function fetchServerHealth() {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), SERVER_HEALTH_TIMEOUT);
+
+  try {
+    const resp = await fetch(`${serverUrl}/health`, { signal: controller.signal });
+    if (!resp.ok) {
+      throw new Error(`Server returned ${resp.status}`);
+    }
+    return { ok: true, data: await resp.json() };
+  } catch (error) {
+    const message =
+      error?.name === "AbortError"
+        ? "Timed out contacting the local server"
+        : error && typeof error.message === "string"
+          ? error.message
+          : "Failed to reach the local server";
+    return { ok: false, error: message };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 function buildSearchUrl(query, { fast = false, authuser = null, extra = "" } = {}) {
   let url = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=50`;
@@ -397,7 +616,7 @@ async function ensureInitialized() {
 }
 
 async function initialize() {
-  await Promise.all([loadThreadTabs(), loadActiveTabs(), loadServerUrl()]);
+  await Promise.all([loadThreadTabs(), loadActiveTabs(), loadStoredState()]);
   isInitialized = true;
   await startPolling();
 }
@@ -411,12 +630,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 async function startPolling() {
+  await chrome.alarms.clear(ALARM_NAME);
   await chrome.alarms.create(ALARM_NAME, {
-    delayInMinutes: 0,
-    periodInMinutes: POLL_INTERVAL / 60000,
+    periodInMinutes: ALARM_WAKE_INTERVAL_MINUTES,
   });
-  // Also fire immediately (alarms have ~1min minimum in MV3,
-  // so we supplement with setTimeout for responsiveness)
+  // Alarms wake an idle MV3 worker, while setTimeout gives us faster polling
+  // whenever the worker is already alive.
   pollServer();
 }
 
@@ -459,7 +678,7 @@ async function pollServer() {
 
   // Supplement alarm with setTimeout for sub-minute responsiveness.
   // If the service worker stays alive, this fires at 1.5s intervals.
-  // If it goes idle, the alarm wakes it back up (at ~1min intervals).
+  // If it goes idle, the alarm wakes it back up on the normal MV3 cadence.
   setTimeout(pollServer, POLL_INTERVAL);
 }
 
@@ -666,8 +885,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       let nextAccount = googleAccounts.find((idx) => !state.triedAuthUsers.has(idx));
       if (nextAccount === undefined && !state.refreshedAccounts) {
         state.refreshedAccounts = true;
-        const refreshedAccounts = await refreshGoogleAccounts();
-        nextAccount = refreshedAccounts.find((idx) => !state.triedAuthUsers.has(idx));
+        const refreshedAccounts = await refreshGoogleAccounts({ force: true });
+        nextAccount = refreshedAccounts
+          .map((account) => account.index)
+          .find((idx) => !state.triedAuthUsers.has(idx));
       }
       if (nextAccount !== undefined && !entry.fast) {
         console.log(`Quota exhausted on authuser=${entry.authuser}, trying authuser=${nextAccount}`, entry.queryId);
@@ -708,6 +929,51 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   })().catch((error) => {
     console.error("Failed to relay AI overview result", error);
     sendResponse({ received: false, error: String(error) });
+  });
+
+  return true;
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message?.type?.startsWith("POPUP_")) return;
+
+  (async () => {
+    await ensureInitialized();
+
+    if (message.type === "POPUP_GET_STATE") {
+      sendResponse({ ok: true, state: buildPopupState() });
+      return;
+    }
+
+    if (message.type === "POPUP_GET_HEALTH") {
+      const health = await fetchServerHealth();
+      sendResponse({ ok: true, health });
+      return;
+    }
+
+    if (message.type === "POPUP_REFRESH_ACCOUNTS") {
+      await refreshGoogleAccounts({ force: true });
+      sendResponse({ ok: true, state: buildPopupState() });
+      return;
+    }
+
+    if (message.type === "POPUP_SELECT_ACCOUNT") {
+      const nextAuthUser = normalizeAccountIndex(message.authuser, getDefaultAuthUser());
+      const nextAccounts =
+        googleAccountProfiles.length > 0
+          ? googleAccountProfiles.map((account) => account.index)
+          : googleAccounts;
+      await persistAccountState(nextAuthUser, nextAccounts);
+      sendResponse({ ok: true, state: buildPopupState() });
+      return;
+    }
+
+    sendResponse({ ok: false, error: `Unsupported popup message: ${message.type}` });
+  })().catch((error) => {
+    sendResponse({
+      ok: false,
+      error: error && typeof error.message === "string" ? error.message : String(error),
+    });
   });
 
   return true;

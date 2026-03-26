@@ -1,199 +1,354 @@
-const GOOGLE_ACCOUNT_SCAN_LIMIT = 10;
+const statusMessageTimers = [];
 
-async function fetchGoogleAccounts() {
-  // Find or create a google.com tab to make same-origin fetches
-  let tab;
-  let createdTab = false;
-  const tabs = await chrome.tabs.query({ url: "https://www.google.com/*" });
-  if (tabs.length > 0) {
-    tab = tabs[0];
-  } else {
-    tab = await chrome.tabs.create({ url: "https://www.google.com/", active: false });
-    createdTab = true;
-    await new Promise((resolve) => {
-      const listener = (tabId, info) => {
-        if (tabId === tab.id && info.status === "complete") {
-          chrome.tabs.onUpdated.removeListener(listener);
-          resolve();
-        }
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-      setTimeout(resolve, 8000);
+function sendRuntimeMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      if (!response?.ok) {
+        reject(new Error(response?.error || "Unknown popup error"));
+        return;
+      }
+      resolve(response);
     });
+  });
+}
+
+function formatRelativeTime(timestamp) {
+  if (!timestamp) {
+    return "No cache yet";
   }
 
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      args: [GOOGLE_ACCOUNT_SCAN_LIMIT],
-      func: async (scanLimit) => {
-        function parseAccount(html, index) {
-          const doc = new DOMParser().parseFromString(html, "text/html");
-          let email = "";
-          let name = "";
-          let photo = "";
+  const diffMs = timestamp - Date.now();
+  const diffMinutes = Math.round(diffMs / 60000);
+  const diffHours = Math.round(diffMs / 3600000);
+  const diffDays = Math.round(diffMs / 86400000);
+  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 
-          const emailEl = doc.querySelector("[data-email]");
-          if (emailEl) {
-            email = (emailEl.getAttribute("data-email") || "").trim();
-          }
+  if (Math.abs(diffMinutes) < 1) {
+    return "Updated just now";
+  }
+  if (Math.abs(diffMinutes) < 60) {
+    return `Updated ${formatter.format(diffMinutes, "minute")}`;
+  }
+  if (Math.abs(diffHours) < 24) {
+    return `Updated ${formatter.format(diffHours, "hour")}`;
+  }
+  return `Updated ${formatter.format(diffDays, "day")}`;
+}
 
-          const labeledNodes = [...doc.querySelectorAll("[aria-label]")];
-          if (!email) {
-            for (const node of labeledNodes) {
-              const label = node.getAttribute("aria-label") || "";
-              const match = label.match(
-                /Google Account:\s*(.*?)\s*(?:\n|\r)\(([^)]+@[^)]+)\)/i
-              );
-              if (match) {
-                name = match[1].trim();
-                email = match[2].trim();
-                break;
-              }
-            }
-          }
+function getHealthPresentation(health) {
+  if (!health) {
+    return {
+      tone: "pending",
+      label: "Checking server",
+      detail: "Verifying the local relay and extension heartbeat.",
+    };
+  }
 
-          if (!email) {
-            const emailMatch = html.match(
-              /[\w.+-]+@(?:gmail\.com|googlemail\.com|[\w.-]+\.[a-z]{2,})/i
-            );
-            if (emailMatch) {
-              email = emailMatch[0].trim();
-            }
-          }
+  if (!health.ok) {
+    return {
+      tone: "error",
+      label: "Server offline",
+      detail: health.error || "The local FastAPI relay could not be reached.",
+    };
+  }
 
-          if (!name && email) {
-            for (const node of labeledNodes) {
-              const label = node.getAttribute("aria-label") || "";
-              if (!label.includes(email)) continue;
-              const match = label.match(
-                /Google Account:\s*(.*?)(?:\s*(?:\n|\r)\(|$)/i
-              );
-              if (match) {
-                name = match[1].trim();
-                break;
-              }
-            }
-          }
+  const data = health.data || {};
+  const extensionStatus = data.extension_status || (data.extension_connected ? "connected" : "stale");
 
-          const photoEl = doc.querySelector(
-            'img[src*="googleusercontent.com"], img[data-src*="googleusercontent.com"]'
-          );
-          if (photoEl) {
-            photo =
-              (photoEl.getAttribute("src") || photoEl.getAttribute("data-src") || "")
-                .trim();
-          }
+  if (extensionStatus === "connected") {
+    return {
+      tone: "success",
+      label: "Browser connected",
+      detail:
+        data.last_poll_age_seconds != null
+          ? `Extension polled ${data.last_poll_age_seconds}s ago.`
+          : "The browser extension is actively polling the relay.",
+    };
+  }
 
-          if (!email) return null;
-          return { index, email, name, photo };
-        }
+  if (extensionStatus === "never_seen") {
+    return {
+      tone: "warning",
+      label: "Waiting for browser",
+      detail: "Open Edge or Chrome with the extension enabled to establish the first poll.",
+    };
+  }
 
-        const accounts = [];
-        const seen = new Set();
-        for (let i = 0; i < scanLimit; i++) {
-          try {
-            const resp = await fetch(`https://www.google.com/search?q=test&authuser=${i}`, {
-              credentials: "include",
-              redirect: "follow",
-            });
-            const html = await resp.text();
-            const account = parseAccount(html, i);
-            if (!account || seen.has(account.email)) continue;
-            seen.add(account.email);
-            accounts.push(account);
-          } catch {
-            // Keep scanning remaining indices in case only one slot fails.
-          }
-        }
-        return accounts;
-      },
-    });
+  return {
+    tone: "warning",
+    label: "Browser idle",
+    detail:
+      data.last_poll_age_seconds != null
+        ? `Last extension poll was ${data.last_poll_age_seconds}s ago.`
+        : "The extension has not checked in recently, but queued requests can still recover when it wakes.",
+  };
+}
 
-    return results[0]?.result || [];
-  } finally {
-    if (createdTab) {
-      try { await chrome.tabs.remove(tab.id); } catch {}
-    }
+function clearStatusMessages() {
+  while (statusMessageTimers.length > 0) {
+    clearTimeout(statusMessageTimers.pop());
   }
 }
 
-document.addEventListener("DOMContentLoaded", async () => {
-  const content = document.getElementById("content");
-  const status = document.getElementById("status");
+function setStatusMessage(text, tone = "neutral", autoClear = false) {
+  const statusEl = document.getElementById("status");
+  statusEl.textContent = text || "";
+  statusEl.className = `status tone-${tone}`;
 
-  content.innerHTML = '<div class="loading">Detecting accounts…</div>';
+  clearStatusMessages();
+  if (autoClear && text) {
+    statusMessageTimers.push(
+      setTimeout(() => {
+        statusEl.textContent = "";
+        statusEl.className = "status tone-neutral";
+      }, 2400)
+    );
+  }
+}
 
-  let accounts;
-  try {
-    accounts = await fetchGoogleAccounts();
-  } catch (err) {
-    content.innerHTML = `<div class="loading error">${err.message}</div>`;
+function buildAvatar(account) {
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+
+  if (account.photo) {
+    const img = document.createElement("img");
+    img.src = account.photo;
+    img.alt = "";
+    img.referrerPolicy = "no-referrer";
+    avatar.appendChild(img);
+  } else {
+    avatar.textContent = (account.name || account.email || "?").slice(0, 1).toUpperCase();
+  }
+
+  return avatar;
+}
+
+function renderSummary(state) {
+  const summaryCard = document.getElementById("summaryCard");
+  const selectedAvatar = document.getElementById("selectedAvatar");
+  const selectedName = document.getElementById("selectedName");
+  const selectedEmail = document.getElementById("selectedEmail");
+  const summaryMeta = document.getElementById("summaryMeta");
+  const selected = state.selectedAccount;
+
+  if (!selected) {
+    summaryCard.hidden = true;
     return;
   }
 
-  if (accounts.length === 0) {
-    content.innerHTML = `<div class="loading error">No Google accounts found. Sign in to Google first.</div>`;
+  summaryCard.hidden = false;
+  const avatarNode = buildAvatar(selected);
+  selectedAvatar.replaceChildren(...avatarNode.childNodes);
+  selectedName.textContent = selected.name || selected.email;
+  selectedEmail.textContent = selected.email;
+  summaryMeta.textContent = `${state.accounts.length} account${state.accounts.length === 1 ? "" : "s"} ready`;
+}
+
+function renderBanner(state) {
+  const banner = document.getElementById("banner");
+  if (!state.accountsLastError) {
+    banner.hidden = true;
+    banner.textContent = "";
     return;
   }
 
-  // Persist full account list for background.js quota rotation
-  const uniqueAccounts = [...new Map(accounts.map((account) => [account.email, account])).values()]
-    .sort((a, b) => a.index - b.index);
-  const accountIndices = uniqueAccounts.map((account) => account.index);
+  banner.hidden = false;
+  banner.textContent = state.accountsLastError;
+}
 
-  const { googleAuthUser } = await chrome.storage.sync.get({ googleAuthUser: 0 });
-  const initialAuthUser = accountIndices.includes(googleAuthUser)
-    ? googleAuthUser
-    : accountIndices[0];
-  await chrome.storage.sync.set({
-    googleAuthUser: initialAuthUser,
-    googleAccounts: accountIndices,
+function renderMeta(state, health) {
+  const cachePill = document.getElementById("cachePill");
+  const connectionPill = document.getElementById("connectionPill");
+  const healthDetail = document.getElementById("healthDetail");
+  const refreshButton = document.getElementById("refreshButton");
+
+  cachePill.textContent = state.accountsUpdatedAt
+    ? formatRelativeTime(state.accountsUpdatedAt)
+    : "No cached accounts";
+  cachePill.className = `pill ${state.accountsStale ? "tone-warning" : "tone-neutral"}`;
+
+  const healthPresentation = getHealthPresentation(health);
+  connectionPill.textContent = healthPresentation.label;
+  connectionPill.className = `pill tone-${healthPresentation.tone}`;
+  healthDetail.textContent = healthPresentation.detail;
+
+  refreshButton.disabled = state.isRefreshingAccounts;
+  refreshButton.textContent = state.isRefreshingAccounts ? "Refreshing..." : "Refresh";
+}
+
+async function selectAccount(account) {
+  const response = await sendRuntimeMessage({
+    type: "POPUP_SELECT_ACCOUNT",
+    authuser: account.index,
   });
+  return response.state;
+}
+
+function renderAccounts(state, onSelect) {
+  const content = document.getElementById("content");
+  content.textContent = "";
+
+  if (!state.accounts.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.innerHTML = `
+      <div class="empty-title">No cached Google accounts yet</div>
+      <div class="empty-copy">Refresh to scan your signed-in Google profiles. The first refresh can take around a minute.</div>
+    `;
+    content.appendChild(empty);
+    return;
+  }
 
   const list = document.createElement("ul");
   list.className = "account-list";
 
-  for (const acct of uniqueAccounts) {
-    const li = document.createElement("li");
-    if (acct.index === initialAuthUser) li.classList.add("selected");
+  for (const account of state.accounts) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `account-card${account.index === state.authuser ? " selected" : ""}`;
+    button.setAttribute("aria-pressed", String(account.index === state.authuser));
 
-    const avatar = document.createElement("div");
-    avatar.className = "avatar";
-    if (acct.photo) {
-      const img = document.createElement("img");
-      img.src = acct.photo;
-      img.referrerPolicy = "no-referrer";
-      avatar.appendChild(img);
-    } else {
-      avatar.textContent = (acct.name || acct.email || "?")[0].toUpperCase();
-    }
-
+    const avatar = buildAvatar(account);
     const info = document.createElement("div");
-    info.className = "account-info";
-    const name = document.createElement("div");
-    name.className = "account-name";
-    name.textContent = acct.name || acct.email;
-    const email = document.createElement("div");
-    email.className = "account-email";
-    email.textContent = acct.email;
-    info.appendChild(name);
-    info.appendChild(email);
+    info.className = "account-copy";
 
-    li.appendChild(avatar);
-    li.appendChild(info);
+    const title = document.createElement("div");
+    title.className = "account-name";
+    title.textContent = account.name || account.email;
 
-    li.addEventListener("click", async () => {
-      list.querySelectorAll("li").forEach((el) => el.classList.remove("selected"));
-      li.classList.add("selected");
-      await chrome.storage.sync.set({ googleAuthUser: acct.index });
-      status.textContent = `Using ${acct.email}`;
-      setTimeout(() => { status.textContent = ""; }, 2000);
+    const subtitle = document.createElement("div");
+    subtitle.className = "account-email";
+    subtitle.textContent = account.email;
+
+    info.appendChild(title);
+    info.appendChild(subtitle);
+
+    const badge = document.createElement("span");
+    badge.className = "account-badge";
+    badge.textContent = account.index === state.authuser ? "Active" : `authuser=${account.index}`;
+
+    button.appendChild(avatar);
+    button.appendChild(info);
+    button.appendChild(badge);
+
+    button.addEventListener("click", async () => {
+      try {
+        const nextState = await onSelect(account);
+        window.popupState = nextState;
+        renderAll();
+        setStatusMessage(`Using ${account.email}`, "success", true);
+      } catch (error) {
+        setStatusMessage(error.message, "error");
+      }
     });
 
-    list.appendChild(li);
+    item.appendChild(button);
+    list.appendChild(item);
   }
 
-  content.innerHTML = "";
   content.appendChild(list);
+}
+
+function renderAll() {
+  const state = window.popupState;
+  const health = window.popupHealth;
+  if (!state) return;
+
+  renderSummary(state);
+  renderBanner(state);
+  renderMeta(state, health);
+  renderAccounts(state, selectAccount);
+}
+
+async function refreshHealth() {
+  try {
+    const response = await sendRuntimeMessage({ type: "POPUP_GET_HEALTH" });
+    window.popupHealth = response.health;
+  } catch (error) {
+    window.popupHealth = { ok: false, error: error.message };
+  }
+  renderAll();
+}
+
+async function refreshAccounts({ showSuccessMessage = false } = {}) {
+  try {
+    window.popupState = {
+      ...window.popupState,
+      isRefreshingAccounts: true,
+    };
+    renderAll();
+    setStatusMessage("Refreshing cached accounts...", "neutral");
+
+    const response = await sendRuntimeMessage({ type: "POPUP_REFRESH_ACCOUNTS" });
+    window.popupState = response.state;
+    renderAll();
+
+    if (showSuccessMessage) {
+      const successText = window.popupState.accounts.length
+        ? "Accounts refreshed"
+        : "Refresh finished with no accounts found";
+      setStatusMessage(successText, "success", true);
+    } else {
+      setStatusMessage("");
+    }
+  } catch (error) {
+    setStatusMessage(error.message, "error");
+  } finally {
+    window.popupState = {
+      ...window.popupState,
+      isRefreshingAccounts: false,
+    };
+    renderAll();
+    await refreshHealth();
+  }
+}
+
+async function loadInitialState() {
+  setStatusMessage("Loading cached accounts...", "neutral");
+
+  const response = await sendRuntimeMessage({ type: "POPUP_GET_STATE" });
+  window.popupState = response.state;
+  window.popupHealth = null;
+  renderAll();
+
+  void refreshHealth();
+
+  if (!window.popupState.accounts.length) {
+    await refreshAccounts();
+  } else {
+    setStatusMessage("");
+  }
+}
+
+document.addEventListener("DOMContentLoaded", async () => {
+  document.getElementById("refreshButton").addEventListener("click", async () => {
+    await refreshAccounts({ showSuccessMessage: true });
+  });
+
+  document.getElementById("settingsButton").addEventListener("click", async () => {
+    await chrome.runtime.openOptionsPage();
+  });
+
+  try {
+    await loadInitialState();
+  } catch (error) {
+    window.popupState = {
+      authuser: 0,
+      accounts: [],
+      selectedAccount: null,
+      accountsUpdatedAt: null,
+      accountsLastError: error.message,
+      accountsStale: true,
+      isRefreshingAccounts: false,
+      serverUrl: "",
+    };
+    window.popupHealth = { ok: false, error: error.message };
+    renderAll();
+    setStatusMessage(error.message, "error");
+  }
 });
