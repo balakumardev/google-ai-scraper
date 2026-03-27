@@ -42,17 +42,15 @@ function formatRelativeTime(timestamp) {
 function getHealthPresentation(health) {
   if (!health) {
     return {
-      tone: "pending",
-      label: "Checking server",
-      detail: "Verifying the local relay and extension heartbeat.",
+      tone: "checking",
+      label: "Checking server...",
     };
   }
 
   if (!health.ok) {
     return {
-      tone: "error",
-      label: "Server offline",
-      detail: health.error || "The local FastAPI relay could not be reached.",
+      tone: "disconnected",
+      label: health.error || "Server unreachable",
     };
   }
 
@@ -61,30 +59,25 @@ function getHealthPresentation(health) {
 
   if (extensionStatus === "connected") {
     return {
-      tone: "success",
-      label: "Browser connected",
-      detail:
-        data.last_poll_age_seconds != null
-          ? `Extension polled ${data.last_poll_age_seconds}s ago.`
-          : "The browser extension is actively polling the relay.",
+      tone: "connected",
+      label: data.last_poll_age_seconds != null
+        ? `Connected \u00b7 polled ${data.last_poll_age_seconds}s ago`
+        : "Server & extension connected",
     };
   }
 
   if (extensionStatus === "never_seen") {
     return {
       tone: "warning",
-      label: "Waiting for browser",
-      detail: "Open Edge or Chrome with the extension enabled to establish the first poll.",
+      label: "Waiting for browser extension",
     };
   }
 
   return {
     tone: "warning",
-    label: "Browser idle",
-    detail:
-      data.last_poll_age_seconds != null
-        ? `Last extension poll was ${data.last_poll_age_seconds}s ago.`
-        : "The extension has not checked in recently, but queued requests can still recover when it wakes.",
+    label: data.last_poll_age_seconds != null
+      ? `Extension idle \u00b7 ${data.last_poll_age_seconds}s since last poll`
+      : "Extension hasn\u2019t checked in recently",
   };
 }
 
@@ -97,14 +90,14 @@ function clearStatusMessages() {
 function setStatusMessage(text, tone = "neutral", autoClear = false) {
   const statusEl = document.getElementById("status");
   statusEl.textContent = text || "";
-  statusEl.className = `status tone-${tone}`;
+  statusEl.className = `status-message tone-${tone}`;
 
   clearStatusMessages();
   if (autoClear && text) {
     statusMessageTimers.push(
       setTimeout(() => {
         statusEl.textContent = "";
-        statusEl.className = "status tone-neutral";
+        statusEl.className = "status-message tone-neutral";
       }, 2400)
     );
   }
@@ -145,7 +138,7 @@ function renderSummary(state) {
   selectedAvatar.replaceChildren(...avatarNode.childNodes);
   selectedName.textContent = selected.name || selected.email;
   selectedEmail.textContent = selected.email;
-  summaryMeta.textContent = `${state.accounts.length} account${state.accounts.length === 1 ? "" : "s"} ready`;
+  summaryMeta.textContent = `${state.accounts.length} account${state.accounts.length === 1 ? "" : "s"}`;
 }
 
 function renderBanner(state) {
@@ -160,24 +153,22 @@ function renderBanner(state) {
   banner.textContent = state.accountsLastError;
 }
 
-function renderMeta(state, health) {
-  const cachePill = document.getElementById("cachePill");
-  const connectionPill = document.getElementById("connectionPill");
-  const healthDetail = document.getElementById("healthDetail");
-  const refreshButton = document.getElementById("refreshButton");
+function renderHealth(health) {
+  const dot = document.getElementById("statusDot");
+  const label = document.getElementById("connectionLabel");
+  const presentation = getHealthPresentation(health);
+  dot.className = `status-dot ${presentation.tone}`;
+  label.textContent = presentation.label;
+}
 
-  cachePill.textContent = state.accountsUpdatedAt
-    ? formatRelativeTime(state.accountsUpdatedAt)
-    : "No cached accounts";
-  cachePill.className = `pill ${state.accountsStale ? "tone-warning" : "tone-neutral"}`;
-
-  const healthPresentation = getHealthPresentation(health);
-  connectionPill.textContent = healthPresentation.label;
-  connectionPill.className = `pill tone-${healthPresentation.tone}`;
-  healthDetail.textContent = healthPresentation.detail;
-
-  refreshButton.disabled = state.isRefreshingAccounts;
-  refreshButton.textContent = state.isRefreshingAccounts ? "Refreshing..." : "Refresh";
+function renderRefreshButton(state) {
+  const btn = document.getElementById("refreshButton");
+  btn.disabled = state.isRefreshingAccounts;
+  if (state.isRefreshingAccounts) {
+    btn.classList.add("spinning");
+  } else {
+    btn.classList.remove("spinning");
+  }
 }
 
 async function selectAccount(account) {
@@ -192,12 +183,23 @@ function renderAccounts(state, onSelect) {
   const content = document.getElementById("content");
   content.textContent = "";
 
+  if (state.isRefreshingAccounts && !state.accounts.length) {
+    content.innerHTML = `
+      <div class="skeleton-list">
+        <div class="skeleton-item"><div class="skeleton-avatar"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>
+        <div class="skeleton-item"><div class="skeleton-avatar"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>
+        <div class="skeleton-item"><div class="skeleton-avatar"></div><div class="skeleton-lines"><div class="skeleton-line"></div><div class="skeleton-line"></div></div></div>
+      </div>
+    `;
+    return;
+  }
+
   if (!state.accounts.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.innerHTML = `
-      <div class="empty-title">No cached Google accounts yet</div>
-      <div class="empty-copy">Refresh to scan your signed-in Google profiles. The first refresh can take around a minute.</div>
+      <div class="empty-title">No cached Google accounts</div>
+      <div class="empty-copy">Click refresh to scan your signed-in Google profiles. First scan may take up to a minute.</div>
     `;
     content.appendChild(empty);
     return;
@@ -261,7 +263,8 @@ function renderAll() {
 
   renderSummary(state);
   renderBanner(state);
-  renderMeta(state, health);
+  renderHealth(health);
+  renderRefreshButton(state);
   renderAccounts(state, selectAccount);
 }
 
@@ -282,7 +285,7 @@ async function refreshAccounts({ showSuccessMessage = false } = {}) {
       isRefreshingAccounts: true,
     };
     renderAll();
-    setStatusMessage("Refreshing cached accounts...", "neutral");
+    setStatusMessage("Refreshing accounts\u2026", "neutral");
 
     const response = await sendRuntimeMessage({ type: "POPUP_REFRESH_ACCOUNTS" });
     window.popupState = response.state;
@@ -291,7 +294,7 @@ async function refreshAccounts({ showSuccessMessage = false } = {}) {
     if (showSuccessMessage) {
       const successText = window.popupState.accounts.length
         ? "Accounts refreshed"
-        : "Refresh finished with no accounts found";
+        : "No accounts found";
       setStatusMessage(successText, "success", true);
     } else {
       setStatusMessage("");
@@ -309,7 +312,7 @@ async function refreshAccounts({ showSuccessMessage = false } = {}) {
 }
 
 async function loadInitialState() {
-  setStatusMessage("Loading cached accounts...", "neutral");
+  setStatusMessage("Loading accounts\u2026", "neutral");
 
   const response = await sendRuntimeMessage({ type: "POPUP_GET_STATE" });
   window.popupState = response.state;

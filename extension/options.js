@@ -10,7 +10,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     input.value = url;
     await chrome.storage.sync.set({ serverUrl: url });
     const status = document.getElementById("status");
-    status.textContent = "Saved";
-    setTimeout(() => { status.textContent = ""; }, 1500);
+    status.classList.add("visible");
+    setTimeout(() => status.classList.remove("visible"), 1500);
   });
 });

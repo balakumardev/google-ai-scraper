@@ -2,22 +2,150 @@
 <html>
 <head>
   <style>
-    body { font-family: system-ui, sans-serif; padding: 16px; min-width: 300px; }
-    label { display: block; font-weight: 500; margin-bottom: 6px; }
-    input { width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box; }
-    .actions { margin-top: 12px; display: flex; align-items: center; gap: 12px; }
-    button { padding: 6px 16px; background: #1a73e8; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
-    button:hover { background: #1557b0; }
-    .status { font-size: 13px; color: #188038; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --background: #ffffff;
+      --foreground: #09090b;
+      --muted: #f4f4f5;
+      --muted-foreground: #71717a;
+      --border: #e4e4e7;
+      --primary: #18181b;
+      --primary-foreground: #fafafa;
+      --ring: #a1a1aa;
+      --radius: 8px;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+      background: var(--background);
+      color: var(--foreground);
+      padding: 20px;
+      min-width: 340px;
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .header img {
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+    }
+
+    .header h1 {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .field {
+      margin-bottom: 16px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 6px;
+      color: var(--foreground);
+    }
+
+    .label-hint {
+      font-weight: 400;
+      color: var(--muted-foreground);
+      font-size: 12px;
+    }
+
+    input[type="url"] {
+      display: block;
+      width: 100%;
+      padding: 8px 12px;
+      font-size: 14px;
+      font-family: inherit;
+      color: var(--foreground);
+      background: var(--background);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    input[type="url"]::placeholder {
+      color: var(--muted-foreground);
+    }
+
+    input[type="url"]:focus {
+      border-color: var(--ring);
+      box-shadow: 0 0 0 3px rgba(161, 161, 170, 0.15);
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 18px;
+      font-size: 14px;
+      font-weight: 500;
+      font-family: inherit;
+      color: var(--primary-foreground);
+      background: var(--primary);
+      border: none;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    button:hover {
+      opacity: 0.85;
+    }
+
+    button:active {
+      opacity: 0.75;
+    }
+
+    .status {
+      font-size: 13px;
+      font-weight: 500;
+      color: #22c55e;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+
+    .status.visible {
+      opacity: 1;
+    }
   </style>
 </head>
 <body>
-  <label for="serverUrl">Server URL</label>
-  <input type="url" id="serverUrl" placeholder="http://localhost:15551">
+  <div class="header">
+    <img src="icons/icon48.png" alt="">
+    <h1>Settings</h1>
+  </div>
+
+  <div class="field">
+    <label for="serverUrl">Server URL <span class="label-hint">(default: localhost:15551)</span></label>
+    <input type="url" id="serverUrl" placeholder="http://localhost:15551">
+  </div>
+
   <div class="actions">
     <button id="save">Save</button>
-    <span id="status" class="status"></span>
+    <span id="status" class="status">Saved</span>
   </div>
+
   <script src="options.js"></script>
 </body>
 </html>
