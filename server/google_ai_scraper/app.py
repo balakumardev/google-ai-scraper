@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from google_ai_scraper import __version__
+
 THREAD_TTL = 120  # seconds of inactivity before auto-cleanup
 EXTENSION_RECENT_POLL_THRESHOLD = 75.0  # MV3 workers can sleep between alarm wakeups
 QUERY_TIMEOUT = 110.0  # seconds — covers MV3 wake latency plus background tab timeout
@@ -141,6 +143,11 @@ def _extension_timeout_message() -> str:
         "so the Manifest V3 background worker may be idle. "
         "Retry in a few seconds if the browser is already open."
     )
+
+
+@app.get("/version")
+async def version():
+    return {"version": __version__}
 
 
 @app.get("/health")

@@ -2,14 +2,18 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
+
+from google_ai_scraper import __version__
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 15551
@@ -183,16 +187,102 @@ def _ensure_local_backend(server_url: str, port: int):
     )
 
 
+def _backend_pid_path(port: int) -> Path:
+    return _state_dir() / f"backend-{port}.pid"
+
+
+def _backend_version(server_url: str) -> str | None:
+    """Get the version of the currently running backend, or None if unreachable."""
+    try:
+        resp = httpx.get(f"{server_url.rstrip('/')}/version", timeout=HEALTHCHECK_TIMEOUT)
+        if resp.status_code == 200:
+            return resp.json().get("version")
+    except Exception:
+        pass
+    return None
+
+
+def _kill_stale_backend(port: int):
+    """Kill a running backend whose version doesn't match the current code."""
+    pid_path = _backend_pid_path(port)
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            # Wait for it to die
+            for _ in range(20):
+                try:
+                    os.kill(pid, 0)
+                    time.sleep(0.25)
+                except OSError:
+                    break
+        except (ValueError, OSError):
+            pass
+        pid_path.unlink(missing_ok=True)
+
+
+def _kill_backend_by_port(port: int):
+    """Last resort: find and kill the backend process listening on a port."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().splitlines():
+            try:
+                pid = int(line.strip())
+                os.kill(pid, signal.SIGTERM)
+            except (ValueError, OSError):
+                pass
+        # Wait for port to free up
+        for _ in range(20):
+            try:
+                resp = httpx.get(f"http://{DEFAULT_HOST}:{port}/health", timeout=0.5)
+                time.sleep(0.25)
+            except Exception:
+                break
+    except Exception:
+        pass
+
+
+def _ensure_backend_current(server_url: str, port: int):
+    """If the running backend is outdated, kill and respawn it."""
+    running_version = _backend_version(server_url)
+    if running_version == __version__:
+        return
+    if not _backend_healthy(server_url):
+        # Not running — _ensure_local_backend will handle spawning
+        return
+    # Backend is running but version is wrong or missing (no /version endpoint = very old)
+    _kill_stale_backend(port)
+    # If PID file kill didn't work (old backend without PID file), kill by port
+    if _backend_healthy(server_url):
+        _kill_backend_by_port(port)
+    # Wait for the port to free up
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if not _backend_healthy(server_url):
+            break
+        time.sleep(0.25)
+
+
 def _run_backend(port: int):
     import uvicorn
 
     from google_ai_scraper.app import app as fastapi_app
 
-    asyncio.run(
-        uvicorn.Server(
-            uvicorn.Config(fastapi_app, host=DEFAULT_HOST, port=port, log_level="warning")
-        ).serve()
-    )
+    # Write PID file so we can kill stale backends on version mismatch
+    pid_path = _backend_pid_path(port)
+    pid_path.write_text(str(os.getpid()))
+
+    try:
+        asyncio.run(
+            uvicorn.Server(
+                uvicorn.Config(fastapi_app, host=DEFAULT_HOST, port=port, log_level="warning")
+            ).serve()
+        )
+    finally:
+        pid_path.unlink(missing_ok=True)
 
 
 async def _request(method: str, path: str, **kwargs) -> dict:
@@ -314,6 +404,20 @@ async def health() -> str:
     return json.dumps(result, indent=2)
 
 
+def _parent_watchdog():
+    """Exit when the parent process dies (MCP client session ended).
+
+    When Claude Code exits, `uv run` (our parent) gets killed.  The OS
+    reparents us to launchd (PID 1).  Detect that and exit so we don't
+    accumulate as zombie MCP stdio servers.
+    """
+    original_ppid = os.getppid()
+    while True:
+        time.sleep(5)
+        if os.getppid() != original_ppid:
+            os._exit(0)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Google AI Scraper MCP Server")
     parser.add_argument("--sse", action="store_true", help="Run with SSE transport (default: stdio)")
@@ -334,6 +438,7 @@ def main():
 
     if AUTO_MANAGE_SERVER:
         try:
+            _ensure_backend_current(SERVER_URL, MANAGED_BACKEND_PORT)
             _ensure_local_backend(SERVER_URL, MANAGED_BACKEND_PORT)
         except RuntimeError as exc:
             raise SystemExit(str(exc)) from exc
@@ -341,6 +446,9 @@ def main():
     if args.sse:
         mcp.run(transport="sse")
     else:
+        # Start watchdog to clean up when the MCP client (parent) exits
+        watchdog = threading.Thread(target=_parent_watchdog, daemon=True)
+        watchdog.start()
         mcp.run()
 
 
