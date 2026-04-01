@@ -182,7 +182,7 @@
         if (href.startsWith("/url?")) {
           try {
             const u = new URL(href, "https://www.google.com");
-            href = u.searchParams.get("q") || href;
+            href = u.searchParams.get("q") || u.searchParams.get("url") || href;
           } catch {
             // keep as-is
           }
@@ -210,7 +210,7 @@
       if (href.startsWith("/url?")) {
         try {
           const u = new URL(href, "https://www.google.com");
-          href = u.searchParams.get("q") || href;
+          href = u.searchParams.get("q") || u.searchParams.get("url") || href;
         } catch {
           continue;
         }
@@ -223,6 +223,7 @@
         href.includes("google.com/search") ||
         href.includes("accounts.google.com") ||
         href.includes("policies.google.com") ||
+        href.includes("support.google.com") ||
         href.startsWith("data:") ||
         href.length < 10
       ) {
