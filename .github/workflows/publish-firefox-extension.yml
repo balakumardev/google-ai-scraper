@@ -1,0 +1,90 @@
+name: Publish Firefox Extension
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "firefox-extension/**"
+      - "firefox-store-listing.md"
+      - "firefox-store-metadata.json"
+      - "scripts/generate_extension_icons.py"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    if: github.ref_name == 'main' || github.ref_name == 'master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install web-ext
+        run: npm install --global web-ext
+
+      - name: Bump extension version
+        id: bump
+        working-directory: firefox-extension
+        run: |
+          current=$(grep -Po '(?<="version": ")[^"]+' manifest.json)
+          IFS='.' read -r major minor <<< "$current"
+          new_version="$major.$((minor + 1))"
+          sed -i "s/\"version\": \"$current\"/\"version\": \"$new_version\"/" manifest.json
+          echo "Bumped extension $current → $new_version"
+          echo "new=$new_version" >> "$GITHUB_OUTPUT"
+
+      - name: Lint add-on
+        run: web-ext lint --source-dir firefox-extension
+
+      - name: Build unsigned XPI
+        run: web-ext build --source-dir firefox-extension --artifacts-dir web-ext-artifacts
+
+      - name: Sign and submit to AMO
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          web-ext sign \
+            --source-dir firefox-extension \
+            --artifacts-dir web-ext-artifacts \
+            --api-key "$AMO_JWT_ISSUER" \
+            --api-secret "$AMO_JWT_SECRET" \
+            --channel listed \
+            --amo-metadata=firefox-store-metadata.json
+
+      - name: Upload signed XPI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firefox-extension-xpi-${{ steps.bump.outputs.new }}
+          path: web-ext-artifacts/*.xpi
+          if-no-files-found: error
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add firefox-extension/manifest.json
+          if git diff --cached --quiet; then
+            echo "No Firefox extension version changes to commit"
+            exit 0
+          fi
+          git commit -m "Bump Firefox extension version [skip ci]"
+          target_branch="${GITHUB_REF_NAME}"
+          for attempt in 1 2 3; do
+            git fetch origin "$target_branch"
+            git rebase "origin/$target_branch"
+            if git push origin HEAD:"$target_branch"; then
+              exit 0
+            fi
+            echo "Push attempt $attempt failed; retrying..."
+            sleep $((attempt * 2))
+          done
+          echo "Failed to push Firefox extension version bump after 3 attempts" >&2
+          exit 1

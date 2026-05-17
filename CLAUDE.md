@@ -1,6 +1,6 @@
 # Google AI Overview Scraper
 
-Scrapes Google AI Overviews via a Chrome extension relay — no browser focus stealing.
+Scrapes Google AI Overviews via a browser extension relay — no browser focus stealing.
 
 ## Architecture: Extension-Driven Relay
 
@@ -11,7 +11,7 @@ MCP Server (server/google_ai_scraper/mcp_server/server.py)
     ↕ httpx (shared FastAPI backend on port 15551)
 FastAPI Server (server/google_ai_scraper/app.py)
     ↕ polling (1.5s)
-Chrome Extension Background Worker
+Browser Extension Background Worker
     → creates background tab (active: false)
     → content script scrapes AI Overview
     → POSTs result back to server
@@ -44,6 +44,14 @@ extension/
   options.html/js          # Settings page (server URL config)
   icons/                   # Extension icons (16, 32, 48, 128px)
   lib/turndown.js          # HTML→Markdown library (v7.2.0 from unpkg)
+firefox-extension/
+  manifest.json            # Firefox MV3 manifest
+  background.js            # Background script with Firefox-compatible API usage
+  content.js               # AI Overview + image extraction with follow-ups
+  popup.html/js/css        # Firefox popup UI
+  options.html/js          # Settings page
+  icons/                   # Extension icons (16, 32, 48, 128px)
+  lib/turndown.js          # Bundled HTML→Markdown library
 ```
 
 ## Server Endpoints (app.py, default port 15551)

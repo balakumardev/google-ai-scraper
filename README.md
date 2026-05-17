@@ -1,6 +1,6 @@
 # Google AI Overview Scraper
 
-Scrapes Google AI Overviews via a Chrome extension relay. Available as an HTTP API and an MCP server for AI agents such as Claude Code, Claude Desktop, and Cursor.
+Scrapes Google AI Overviews via a browser extension relay. Chrome and Firefox extension packages are included, alongside an HTTP API and MCP server for AI agents such as Claude Code, Claude Desktop, and Cursor.
 
 No browser focus stealing. Queries run in background tabs.
 
@@ -11,7 +11,7 @@ MCP Client / HTTP Client
         ↕ httpx
    Shared FastAPI Backend (:15551)
         ↕ polling
-   Chrome Extension
+ Chrome Extension / Firefox Add-on
         → background tab → scrape → result
 ```
 
@@ -19,7 +19,7 @@ MCP Client / HTTP Client
 
 - Python 3.13+
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
-- Chrome or another Chromium-based browser
+- Chrome/Chromium or Firefox
 
 ## Quick Install
 
@@ -27,11 +27,13 @@ MCP Client / HTTP Client
 uvx google-ai-scraper
 ```
 
-Install the published extension from the Chrome Web Store:
+Install the published Chrome extension from the Chrome Web Store:
 
 https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en
 
-Then open the extension's options page and set the server URL to `http://localhost:15551`.
+Or load the Firefox add-on locally from `firefox-extension/manifest.json` via `about:debugging#/runtime/this-firefox`.
+
+In either browser, open the extension/add-on settings and set the server URL to `http://localhost:15551`.
 
 For MCP clients, the simplest config is:
 
@@ -57,13 +59,19 @@ cd server
 uv sync
 ```
 
-### 2. Install the extension
+### 2. Install the browser extension/add-on
 
-Install the published extension from the Chrome Web Store:
+Chrome:
 
 https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en
 
-Then open the extension's options page and set the server URL to `http://localhost:15551`.
+Firefox:
+
+1. Open `about:debugging#/runtime/this-firefox`
+2. Click **Load Temporary Add-on**
+3. Select `firefox-extension/manifest.json`
+
+Then open the extension/add-on settings and set the server URL to `http://localhost:15551`.
 
 ### 3. Start a local backend for direct HTTP testing
 
