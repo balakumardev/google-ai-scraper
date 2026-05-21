@@ -359,6 +359,11 @@
     };
   }
 
+  const QUOTA_EXHAUSTION_PATTERNS = [
+    /\byou(?:['`\u2019]ve| have)\s+reached\s+(?:your\s+)?(?:daily\s+)?(?:usage\s+)?limit\b/i,
+    /\b(?:daily\s+)?(?:usage\s+)?limit\s+(?:has\s+been\s+)?reached\b/i,
+  ];
+
   function waitForExtraction(
     extractFn,
     onDone,
@@ -439,12 +444,18 @@
   function detectQuotaExhaustion(container) {
     if (!container) return false;
     const text = container.textContent || "";
-    return /you['']ve reached your daily limit/i.test(text);
+    return QUOTA_EXHAUSTION_PATTERNS.some((pattern) => pattern.test(text));
   }
 
   function tryExtractInitialOverview() {
     const container = findAIOverviewContainer();
-    if (!container) return null;
+    if (!container) {
+      if (detectQuotaExhaustion(document.body)) {
+        const q = new URLSearchParams(window.location.search).get("q") || "";
+        return buildQuotaExhaustedResult(q);
+      }
+      return null;
+    }
 
     if (detectQuotaExhaustion(container)) {
       const q = new URLSearchParams(window.location.search).get("q") || "";
@@ -483,7 +494,7 @@
     );
 
     if (allMainCols.length === 0) {
-      const container = findAIOverviewContainer();
+      const container = findAIOverviewContainer() || document.body;
       if (detectQuotaExhaustion(container)) {
         return buildQuotaExhaustedResult(query);
       }
@@ -549,7 +560,7 @@
     const currentAimc =
       allMainCols[allMainCols.length - 1]?.closest('[data-subtree="aimc"]') ||
       findAIOverviewContainer();
-    if (detectQuotaExhaustion(currentAimc)) {
+    if (detectQuotaExhaustion(currentAimc || document.body)) {
       return buildQuotaExhaustedResult(query);
     }
 

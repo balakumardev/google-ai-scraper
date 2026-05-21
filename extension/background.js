@@ -483,7 +483,7 @@ function buildSearchUrl(query, { fast = false, authuser = null, extra = "" } = {
   let url = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=50`;
   if (!fast) url += "&arv=1";
   const au = resolveSearchAuthUser(authuser);
-  if (au > 0) url += `&authuser=${au}`;
+  url += `&authuser=${au}`;
   if (extra) url += extra;
   return url;
 }
