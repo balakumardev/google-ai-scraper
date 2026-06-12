@@ -1,6 +1,6 @@
 # Google AI Overview Scraper
 
-Scrapes Google AI Overviews via a Chrome extension relay. Available as an HTTP API and an MCP server for AI agents such as Claude Code, Claude Desktop, and Cursor.
+Scrapes Google AI Overviews via a browser extension relay (Chrome Web Store or Firefox sideload). Available as an HTTP API and an MCP server for AI agents such as Claude Code, Claude Desktop, and Cursor.
 
 No browser focus stealing. Queries run in background tabs.
 
@@ -11,7 +11,7 @@ MCP Client / HTTP Client
         ↕ httpx
    Shared FastAPI Backend (:15551)
         ↕ polling
-   Chrome Extension
+   Browser Extension (Chrome or Firefox)
         → background tab → scrape → result
 ```
 
@@ -19,7 +19,7 @@ MCP Client / HTTP Client
 
 - Python 3.13+
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
-- Chrome or another Chromium-based browser
+- Chrome or another Chromium-based browser, **or Firefox 128+** (see [Firefox](#firefox-extension) below)
 
 ## Quick Install
 
@@ -65,6 +65,8 @@ https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfp
 
 Then open the extension's options page and set the server URL to `http://localhost:15551`.
 
+**Or use Firefox from source:** see [Firefox extension](#firefox-extension).
+
 ### 3. Start a local backend for direct HTTP testing
 
 ```bash
@@ -87,6 +89,37 @@ curl -s http://localhost:15551/health
 
 # Run a query
 curl -s "http://localhost:15551/ask?q=what+is+photosynthesis" | python3 -m json.tool
+```
+
+## Firefox extension
+
+The Firefox build lives in `firefox-extension/`. It uses the same JavaScript as `extension/`, copied via `scripts/sync-firefox-extension.sh` (Firefox **cannot** load add-on files through symlinks outside the extension folder). Only `manifest.json` is Firefox-specific.
+
+**Requirements:** Firefox 128 or later.
+
+**After changing `extension/` sources**, re-sync before testing in Firefox:
+
+```bash
+./scripts/sync-firefox-extension.sh
+```
+
+**Load for development:**
+
+1. Start the backend (see step 3 above).
+2. Open `about:debugging#/runtime/this-firefox` in Firefox.
+3. **Remove** any old temporary copy of this add-on, then click **Load Temporary Add-on…** and select `firefox-extension/manifest.json`.
+4. Open the extension **Inspect** link on the background script — you should see polling logs, not a load error for `background.js`.
+5. Open the extension options and set the server URL to `http://localhost:15551`.
+
+Temporary add-ons are removed when Firefox restarts. A signed AMO release is not set up yet.
+
+**Note:** Firefox shows the background script as **Stopped** when its event page is idle; that is normal. It wakes on alarms and while polling. If `/health` shows `extension_connected: false`, check the background inspector for errors.
+
+**Package a ZIP for sideload/testing:**
+
+```bash
+./scripts/sync-firefox-extension.sh
+cd firefox-extension && zip -r ../google-ai-scraper-firefox.zip . -x ".*"
 ```
 
 ## HTTP API

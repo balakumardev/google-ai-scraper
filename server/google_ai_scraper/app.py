@@ -131,7 +131,7 @@ def _extension_timeout_message() -> str:
     extension_status, poll_age = _extension_poll_snapshot()
     base_message = (
         "Browser extension did not respond in time. "
-        "Make sure Edge, Chrome, or another Chromium browser is open, the extension is enabled, "
+        "Make sure Edge, Chrome, Firefox, or another supported browser is open, the extension is enabled, "
         "and its server URL matches this server."
     )
 

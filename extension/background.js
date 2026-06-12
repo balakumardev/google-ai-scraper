@@ -1,6 +1,11 @@
 const DEFAULT_SERVER = "http://localhost:15551";
 const POLL_INTERVAL = 1500;
-const ALARM_WAKE_INTERVAL_MINUTES = 0.5;
+// Firefox requires periodInMinutes >= 1; Chrome allows 0.5 for faster MV3 wake.
+const ALARM_WAKE_INTERVAL_MINUTES =
+  typeof browser !== "undefined" &&
+  browser.runtime?.getManifest?.()?.browser_specific_settings?.gecko
+    ? 1
+    : 0.5;
 // 60s extraction budget + 8s buffer so background.js can return tab_timeout
 // before the FastAPI request-level timeout expires.
 const TAB_TIMEOUT = 68000;
@@ -24,7 +29,9 @@ const activeTabs = new Map();
 let threadTabs = new Map();
 let pollInFlight = false;
 let isInitialized = false;
-const startupPromise = initialize();
+const startupPromise = initialize().catch((error) => {
+  console.error("Google AI Scraper failed to initialize", error);
+});
 
 function normalizeAccountIndex(value, fallback = 0) {
   const num = Number(value);
@@ -630,10 +637,17 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 async function startPolling() {
-  await chrome.alarms.clear(ALARM_NAME);
-  await chrome.alarms.create(ALARM_NAME, {
-    periodInMinutes: ALARM_WAKE_INTERVAL_MINUTES,
-  });
+  try {
+    await chrome.alarms.clear(ALARM_NAME);
+    await chrome.alarms.create(ALARM_NAME, {
+      periodInMinutes: ALARM_WAKE_INTERVAL_MINUTES,
+    });
+  } catch (error) {
+    console.warn(
+      "Failed to create poll alarm; relying on setTimeout polling only",
+      error
+    );
+  }
   // Alarms wake an idle MV3 worker, while setTimeout gives us faster polling
   // whenever the worker is already alive.
   pollServer();
