@@ -86,6 +86,8 @@ jobs:
 
       - name: Commit version bump
         run: |
+          # npm version rewrote npm/package.json in the working tree; only the server bump is committed.
+          git checkout -- npm
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add server/pyproject.toml server/google_ai_scraper/__init__.py
