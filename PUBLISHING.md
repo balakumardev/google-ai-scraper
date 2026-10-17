@@ -49,6 +49,35 @@ kill %1
 
 ---
 
+## Continuous publishing (what CI does on every push to `main`)
+
+| Change under | Workflow | Result |
+|---|---|---|
+| `server/**` or `npm/**` | `publish.yml` | bumps the patch version, publishes to **PyPI**, then **npm** (same version) |
+| `extension/**` | `publish-extension.yml` | bumps the minor version and uploads + publishes to the **Chrome Web Store** |
+| `extension/**`, `firefox-extension/**` | `publish-firefox-extension.yml` | re-syncs `firefox-extension/` from `extension/`, bumps the version, lints, signs and submits to **AMO** |
+| `store-assets/dist/**`, `store-assets/listing/description.txt` | `amo-listing.yml` | updates the AMO description, icon and screenshots |
+
+Secrets: `UV_PUBLISH_TOKEN` (PyPI), `NPM_TOKEN` (npm automation token; the step is skipped with a notice when unset), `CWS_CLIENT_ID`, `CWS_CLIENT_SECRET`, `CWS_REFRESH_TOKEN`, `CWS_EXTENSION_ID` (Chrome), `AMO_JWT_ISSUER`, `AMO_JWT_SECRET` (Firefox).
+
+The Chrome Web Store API only uploads the package. Its listing (description, screenshots, promo tiles, permission text) is edited in the Developer Dashboard; copy from `store-assets/listing/` and upload from `store-assets/dist/`. The Chrome store also rejects an upload while an earlier version is still in review, so re-push after the review clears.
+
+### Store graphics
+
+Everything (icon, screenshots, promo tiles) is rendered from `store-assets/src/` by one script (needs Google Chrome and macOS `sips`):
+
+```bash
+python3 store-assets/build.py
+```
+
+It also rewrites the toolbar icons in `extension/icons/` and `firefox-extension/icons/`.
+
+## npm (MCP launcher)
+
+`npm/` is a thin package so `npx -y google-ai-scraper` works in MCP configs. Its `bin/cli.js` runs the same-version PyPI release via `uvx` (falling back to `pipx`). CI sets the npm version to the freshly bumped PyPI version; do not publish it by hand.
+
+---
+
 ## Chrome Web Store (Extension)
 
 ### First-Time Setup
@@ -60,8 +89,7 @@ kill %1
 2. **Prepare the ZIP:**
    ```bash
    cd extension
-   zip -r ../chrome-store-assets/google-ai-scraper-extension.zip . \
-     -x ".*" -x "__MACOSX/*"
+   zip -r ../google-ai-scraper-extension.zip . -x ".*" -x "__MACOSX/*"
    ```
 
 ### Submit
@@ -69,14 +97,14 @@ kill %1
 1. Go to https://chrome.google.com/webstore/devconsole
 2. Click **New Item** → Upload the ZIP
 3. Fill in the **Store Listing** tab:
-   - Detailed description: copy from `chrome-store-listing.md`
+   - Detailed description: copy from `store-assets/listing/description.txt`
    - Category: **Developer Tools**
    - Language: English
-   - Screenshots: upload from `chrome-store-assets/` (1280x800 PNGs)
-   - Small promo tile: upload `promo-tile-440x280.png`
+   - Screenshots: upload `store-assets/dist/screenshot-1.png` ... `screenshot-5.png` (1280x800)
+   - Small promo tile: `promo-small-440x280.png`; marquee: `promo-marquee-1400x560.png`
 4. Fill in the **Privacy Practices** tab:
-   - Single purpose: copy from `chrome-store-listing.md`
-   - Permission justifications: copy from `chrome-store-listing.md`
+   - Single purpose: copy from `store-assets/listing/chrome-permissions.md`
+   - Permission justifications: copy from `store-assets/listing/chrome-permissions.md`
    - Data disclosures: check "I do not collect any user data"
    - Privacy policy URL: `https://github.com/balakumardev/google-ai-scraper/blob/main/docs/privacy-policy.md`
 5. Fill in the **Distribution** tab:
@@ -123,10 +151,53 @@ After this, any push to `main` that changes `extension/` will auto-bump version,
 
 ---
 
-## All CWS Listing Text
+## Firefox Add-ons (Extension)
 
-All text content (description, permission justifications, etc.) is pre-written in:
-**`chrome-store-listing.md`** — copy/paste directly into the Chrome Web Store dashboard.
+### First-Time Setup
 
-All images are in:
-**`chrome-store-assets/`** — upload directly.
+1. Create an AMO developer account at https://addons.mozilla.org/developers/
+2. Create API credentials at https://addons.mozilla.org/developers/addon/api/key/
+   - Save the **JWT issuer** and **JWT secret**
+3. Confirm the Firefox add-on ID in `firefox-extension/manifest.json`
+   - Gecko ID (must stay stable, it is the live listing): `google-ai-overview-scraper@balakumar.dev`
+
+### Local Validation
+
+```bash
+npm install --global web-ext
+
+# Lint
+web-ext lint --source-dir firefox-extension
+
+# Build unsigned XPI
+web-ext build --source-dir firefox-extension --artifacts-dir web-ext-artifacts
+
+# Sign + submit listed add-on
+web-ext sign \
+  --source-dir firefox-extension \
+  --artifacts-dir web-ext-artifacts \
+  --api-key YOUR_AMO_JWT_ISSUER \
+  --api-secret YOUR_AMO_JWT_SECRET \
+  --channel listed \
+  --amo-metadata=store-assets/amo-metadata.json
+```
+
+### Listing Content
+
+- Description: `store-assets/listing/description.txt`
+- AMO metadata for `web-ext sign`: `store-assets/amo-metadata.json`
+- Icon and screenshots: `store-assets/dist/`
+- Push description/icon/screenshots with `python3 store-assets/amo_listing.py` (needs `AMO_JWT_ISSUER`/`AMO_JWT_SECRET`) or let `amo-listing.yml` do it.
+
+### CI Auto-Publish
+
+`.github/workflows/publish-firefox-extension.yml` runs on every push to `main` that touches `extension/` or `firefox-extension/`. It copies the shared sources from `extension/` into `firefox-extension/` first, so `extension/` is the single source of truth (only `firefox-extension/manifest.json` is Firefox-specific).
+
+### Manual Update (alternative)
+
+1. Bump `version` in `firefox-extension/manifest.json`
+2. Run `web-ext lint` and `web-ext build`
+3. Run `web-ext sign` with the metadata file
+4. Verify the signed XPI in `web-ext-artifacts/`
+
+---

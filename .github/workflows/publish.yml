@@ -1,10 +1,11 @@
-name: Auto Version & Publish
+name: Auto Version & Publish (PyPI + npm)
 
 on:
   push:
     branches: [main, master]
     paths:
       - "server/**"
+      - "npm/**"
   workflow_dispatch:
 
 jobs:
@@ -53,6 +54,35 @@ jobs:
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.UV_PUBLISH_TOKEN }}
         run: uv publish
+
+      - name: Detect npm credentials
+        id: detect_npm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::NPM_TOKEN is not set; skipping npm publish"
+          fi
+
+      - name: Set up Node
+        if: steps.detect_npm.outputs.ok == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish to npm
+        if: steps.detect_npm.outputs.ok == 'true'
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # The npm launcher runs the matching PyPI release, so versions stay in lockstep.
+          npm version "${{ steps.bump.outputs.new }}" --no-git-tag-version --allow-same-version
+          npm publish --access public
 
       - name: Commit version bump
         run: |

@@ -7,6 +7,10 @@ on:
       - "extension/**"
   workflow_dispatch:
 
+concurrency:
+  group: publish-chrome-extension
+  cancel-in-progress: false
+
 jobs:
   publish:
     if: github.ref_name == 'main' || github.ref_name == 'master'

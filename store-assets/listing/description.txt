@@ -1,0 +1,43 @@
+Give your AI tools live, cited answers from Google AI Overviews, as clean Markdown. No API keys. Nothing leaves your machine.
+
+Google AI Overview Scraper is the browser half of a small local MCP (Model Context Protocol) server. When Claude Code, Cursor, Claude Desktop or any other MCP client asks a question, this extension runs the search in a background tab, extracts the AI Overview, and sends back Markdown with source citations.
+
+HOW IT WORKS
+1. Your AI tool calls the local MCP server.
+2. The extension opens a background Google AI Mode tab. It never steals focus.
+3. The AI Overview is converted to Markdown with citations.
+4. Everything flows back to your tool, with a thread_id for follow-up questions.
+
+WHAT YOU GET
+• Clean Markdown with deduplicated source citations
+• Follow-up questions in the same conversation (thread_id)
+• Pro or fast mode, chosen per query by your AI tool
+• Google account picker with automatic quota rotation
+• Image generation through the generate_image tool
+• Live connection status in the toolbar popup
+• Works with Claude Code, Claude Desktop, Cursor and any MCP client
+
+SET UP IN A MINUTE
+1. Install this extension.
+2. Install uv (https://docs.astral.sh/uv/) and run: uvx google-ai-scraper
+3. Add the server to your MCP client:
+
+{
+  "mcpServers": {
+    "google-ai-scraper": {
+      "command": "uvx",
+      "args": ["google-ai-scraper"]
+    }
+  }
+}
+
+MCP TOOLS
+• search: query Google AI Overview, get Markdown + citations + thread_id
+• follow_up: continue a conversation in an existing thread
+• generate_image: generate an image and save it to disk
+• health: check the server and extension connection
+
+PRIVACY
+• Talks only to google.com and a server on your own machine (localhost)
+• No analytics, no tracking, no accounts, no data collection
+• Open source: https://github.com/balakumardev/google-ai-scraper

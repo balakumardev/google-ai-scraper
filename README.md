@@ -1,6 +1,13 @@
 # Google AI Overview Scraper
 
-Scrapes Google AI Overviews via a browser extension relay (Chrome Web Store or Firefox sideload). Available as an HTTP API and an MCP server for AI agents such as Claude Code, Claude Desktop, and Cursor.
+Scrapes Google AI Overviews via a browser extension relay and returns them as clean Markdown with citations. Ships a Chrome extension, a Firefox add-on, an HTTP API and an MCP server for AI agents such as Claude Code, Claude Desktop, and Cursor.
+
+[![Chrome Web Store](https://img.shields.io/badge/Chrome%20Web%20Store-install-4285F4?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc)
+[![Firefox Add-ons](https://img.shields.io/badge/Firefox%20Add--ons-install-FF7139?logo=firefoxbrowser&logoColor=white)](https://addons.mozilla.org/firefox/addon/google-ai-overview-scraper/)
+[![PyPI](https://img.shields.io/pypi/v/google-ai-scraper?label=PyPI)](https://pypi.org/project/google-ai-scraper/)
+[![npm](https://img.shields.io/npm/v/google-ai-scraper?label=npm)](https://www.npmjs.com/package/google-ai-scraper)
+
+![Google AI Overviews as clean Markdown](store-assets/dist/screenshot-1.png)
 
 No browser focus stealing. Queries run in background tabs.
 
@@ -11,7 +18,7 @@ MCP Client / HTTP Client
         ↕ httpx
    Shared FastAPI Backend (:15551)
         ↕ polling
-   Browser Extension (Chrome or Firefox)
+ Chrome Extension / Firefox Add-on
         → background tab → scrape → result
 ```
 
@@ -19,7 +26,7 @@ MCP Client / HTTP Client
 
 - Python 3.13+
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
-- Chrome or another Chromium-based browser, **or Firefox 128+** (see [Firefox](#firefox-extension) below)
+- Chrome/Chromium or Firefox
 
 ## Quick Install
 
@@ -27,11 +34,14 @@ MCP Client / HTTP Client
 uvx google-ai-scraper
 ```
 
-Install the published extension from the Chrome Web Store:
+Install the extension for your browser:
 
-https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en
+- Chrome: [Chrome Web Store](https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc)
+- Firefox: [Firefox Add-ons](https://addons.mozilla.org/firefox/addon/google-ai-overview-scraper/)
 
-Then open the extension's options page and set the server URL to `http://localhost:15551`.
+To develop locally, load `firefox-extension/manifest.json` via `about:debugging#/runtime/this-firefox`.
+
+In either browser, open the extension/add-on settings and set the server URL to `http://localhost:15551`.
 
 For MCP clients, the simplest config is:
 
@@ -46,6 +56,8 @@ For MCP clients, the simplest config is:
 }
 ```
 
+Prefer npm? `npx -y google-ai-scraper` runs the same server (it launches the matching PyPI release through `uvx` or `pipx`, so uv is still required).
+
 Each MCP client process auto-reuses or auto-starts the shared backend on `127.0.0.1:15551`, so multiple Claude Code windows can use the same config without manual SSE setup.
 
 ## Local Development Setup
@@ -57,15 +69,19 @@ cd server
 uv sync
 ```
 
-### 2. Install the extension
+### 2. Install the browser extension/add-on
 
-Install the published extension from the Chrome Web Store:
+Chrome:
 
 https://chromewebstore.google.com/detail/google-ai-overview-scrape/oidaeopefkgfpeigcjapebhppnbcocpc?authuser=1&hl=en
 
-Then open the extension's options page and set the server URL to `http://localhost:15551`.
+Firefox:
 
-**Or use Firefox from source:** see [Firefox extension](#firefox-extension).
+1. Open `about:debugging#/runtime/this-firefox`
+2. Click **Load Temporary Add-on**
+3. Select `firefox-extension/manifest.json`
+
+Then open the extension/add-on settings and set the server URL to `http://localhost:15551`.
 
 ### 3. Start a local backend for direct HTTP testing
 
@@ -89,37 +105,6 @@ curl -s http://localhost:15551/health
 
 # Run a query
 curl -s "http://localhost:15551/ask?q=what+is+photosynthesis" | python3 -m json.tool
-```
-
-## Firefox extension
-
-The Firefox build lives in `firefox-extension/`. It uses the same JavaScript as `extension/`, copied via `scripts/sync-firefox-extension.sh` (Firefox **cannot** load add-on files through symlinks outside the extension folder). Only `manifest.json` is Firefox-specific.
-
-**Requirements:** Firefox 128 or later.
-
-**After changing `extension/` sources**, re-sync before testing in Firefox:
-
-```bash
-./scripts/sync-firefox-extension.sh
-```
-
-**Load for development:**
-
-1. Start the backend (see step 3 above).
-2. Open `about:debugging#/runtime/this-firefox` in Firefox.
-3. **Remove** any old temporary copy of this add-on, then click **Load Temporary Add-on…** and select `firefox-extension/manifest.json`.
-4. Open the extension **Inspect** link on the background script — you should see polling logs, not a load error for `background.js`.
-5. Open the extension options and set the server URL to `http://localhost:15551`.
-
-Temporary add-ons are removed when Firefox restarts. A signed AMO release is not set up yet.
-
-**Note:** Firefox shows the background script as **Stopped** when its event page is idle; that is normal. It wakes on alarms and while polling. If `/health` shows `extension_connected: false`, check the background inspector for errors.
-
-**Package a ZIP for sideload/testing:**
-
-```bash
-./scripts/sync-firefox-extension.sh
-cd firefox-extension && zip -r ../google-ai-scraper-firefox.zip . -x ".*"
 ```
 
 ## HTTP API
@@ -146,7 +131,7 @@ curl -s -X DELETE "http://localhost:15551/thread/abc123def456"
 
 ## MCP Server
 
-The MCP server wraps the HTTP API as 3 tools for AI agents. In default stdio mode, each MCP client process auto-reuses or auto-starts the shared backend on port `15551`.
+The MCP server wraps the HTTP API as 4 tools for AI agents. In default stdio mode, each MCP client process auto-reuses or auto-starts the shared backend on port `15551`.
 
 ### MCP Tools
 
@@ -154,6 +139,7 @@ The MCP server wraps the HTTP API as 3 tools for AI agents. In default stdio mod
 |---|---|---|
 | `search` | `query` | Search Google AI Overview. Returns markdown, citations, and a `thread_id` for follow-ups. |
 | `follow_up` | `query`, `thread_id` | Continue a conversation in an existing thread. |
+| `generate_image` | `prompt`, `save_path` | Generate an image with Google AI and optionally save it to disk. |
 | `health` | — | Check server and extension connectivity. |
 
 Threads auto-expire after 2 minutes of inactivity.

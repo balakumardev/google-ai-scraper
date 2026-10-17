@@ -1,0 +1,20 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"><style>
+.t{position:absolute;left:64px;right:64px;top:120px}
+.t h1{font-size:54px}
+.grid{position:absolute;left:64px;right:64px;top:250px;display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+.card{background:#fff;border:1px solid var(--line);border-radius:20px;padding:26px 26px 28px;box-shadow:0 20px 40px -22px rgba(30,41,99,.25)}
+.card .ic{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;color:#fff;font-size:22px;margin-bottom:16px}
+.card h3{font-size:22px;font-weight:700;letter-spacing:-.01em}
+.card p{font-size:17px;color:var(--ink2);margin-top:8px;line-height:1.45}
+</style></head><body>
+<div class="brand"><img src="../dist/icon-128.png">Google AI Overview Scraper</div>
+<div class="t"><h1>Private by design, <em>built for agents</em></h1></div>
+<div class="grid">
+<div class="card"><div class="ic" style="background:#16a34a">&#128274;</div><h3>Stays on localhost</h3><p>Talks only to your own server and google.com. No analytics, no tracking.</p></div>
+<div class="card"><div class="ic" style="background:#6366f1">&#128273;</div><h3>No API keys</h3><p>Uses your existing Google session in your own browser.</p></div>
+<div class="card"><div class="ic" style="background:#2563eb">&#9889;</div><h3>Background tabs</h3><p>Queries run in the background and never steal your focus.</p></div>
+<div class="card"><div class="ic" style="background:#0891b2">&#128172;</div><h3>Follow-up threads</h3><p>Continue a conversation with a thread_id, like in the Google UI.</p></div>
+<div class="card"><div class="ic" style="background:#7c3aed">&#127912;</div><h3>Image generation</h3><p>Generate images through the generate_image MCP tool.</p></div>
+<div class="card"><div class="ic" style="background:#ea580c">&#128260;</div><h3>Quota rotation</h3><p>Rotates across your signed-in Google accounts when one hits its limit.</p></div>
+</div>
+<div class="foot"></div></body></html>

@@ -25,6 +25,8 @@ let accountRefreshInFlight = null;
 
 // Map<tabId, {queryId, threadId, isFollowUp, deadlineAt, timeoutId}>
 const activeTabs = new Map();
+// Map<tabId, {queryId, deadlineAt, timeoutId}> — also persisted to chrome.storage.session
+const imageActiveTabs = new Map();
 // Map<threadId, {tabId, authuser, fast}> — also persisted to chrome.storage.session
 let threadTabs = new Map();
 let pollInFlight = false;
@@ -490,7 +492,7 @@ function buildSearchUrl(query, { fast = false, authuser = null, extra = "" } = {
   let url = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=50`;
   if (!fast) url += "&arv=1";
   const au = resolveSearchAuthUser(authuser);
-  if (au > 0) url += `&authuser=${au}`;
+  url += `&authuser=${au}`;
   if (extra) url += extra;
   return url;
 }
@@ -623,7 +625,12 @@ async function ensureInitialized() {
 }
 
 async function initialize() {
-  await Promise.all([loadThreadTabs(), loadActiveTabs(), loadStoredState()]);
+  await Promise.all([
+    loadThreadTabs(),
+    loadActiveTabs(),
+    loadImageTabs(),
+    loadStoredState(),
+  ]);
   isInitialized = true;
   await startPolling();
 }
@@ -995,24 +1002,64 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // --- Image generation pipeline ---
 // Image tabs are fire-and-forget: no thread tracking, tab closes after result.
+// The tabId -> queryId map is mirrored into session storage because the
+// background context (MV3 worker / Firefox event page) can be suspended while
+// Google is still generating; without it the finished image has nowhere to go.
 
-const imageActiveTabs = new Map(); // Map<tabId, {queryId, timeoutId}>
+async function saveImageTabs() {
+  const obj = {};
+  for (const [tabId, entry] of imageActiveTabs.entries()) {
+    obj[tabId] = { queryId: entry.queryId, deadlineAt: entry.deadlineAt };
+  }
+  await chrome.storage.session.set({ imageActiveTabs: obj });
+}
+
+function scheduleImageTimeout(tabId, entry) {
+  clearTimeout(entry.timeoutId);
+  const delay = Math.max(0, entry.deadlineAt - Date.now());
+  entry.timeoutId = setTimeout(async () => {
+    if (imageActiveTabs.get(tabId) !== entry) return;
+    imageActiveTabs.delete(tabId);
+    await saveImageTabs().catch(() => {});
+    await postImageResult(entry.queryId, {
+      images: [],
+      error: "image_generation_timeout",
+    }).catch(() => {});
+    try { await chrome.tabs.remove(tabId); } catch {}
+  }, delay);
+}
+
+async function loadImageTabs() {
+  const data = await chrome.storage.session.get("imageActiveTabs");
+  for (const [tabIdRaw, persisted] of Object.entries(data.imageActiveTabs || {})) {
+    const tabId = Number(tabIdRaw);
+    if (!Number.isInteger(tabId) || !persisted?.queryId) continue;
+    if (imageActiveTabs.has(tabId)) continue;
+    const entry = {
+      queryId: persisted.queryId,
+      deadlineAt: Number(persisted.deadlineAt) || Date.now(),
+      timeoutId: null,
+    };
+    imageActiveTabs.set(tabId, entry);
+    scheduleImageTimeout(tabId, entry);
+  }
+}
 
 async function handleImageQuery(data) {
   try {
     const url = buildSearchUrl(data.query, { extra: "#_img" });
     const tab = await chrome.tabs.create({ url, active: false });
 
-    const timeoutId = setTimeout(async () => {
-      imageActiveTabs.delete(tab.id);
-      await postImageResult(data.query_id, {
-        images: [],
-        error: "image_generation_timeout",
-      }).catch(() => {});
-      try { await chrome.tabs.remove(tab.id); } catch {}
-    }, IMAGE_TAB_TIMEOUT);
-
-    imageActiveTabs.set(tab.id, { queryId: data.query_id, timeoutId });
+    // Register in memory first so an early result from the content script
+    // can never beat the bookkeeping, then persist.
+    const entry = {
+      queryId: data.query_id,
+      deadlineAt: Date.now() + IMAGE_TAB_TIMEOUT,
+      timeoutId: null,
+    };
+    imageActiveTabs.set(tab.id, entry);
+    scheduleImageTimeout(tab.id, entry);
+    await saveImageTabs();
   } catch (err) {
     await postImageResult(data.query_id, {
       images: [],
@@ -1033,6 +1080,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type !== "AI_IMAGE_RESULT" || !sender.tab) return;
 
   (async () => {
+    await ensureInitialized();
     const tabId = sender.tab.id;
     const entry = imageActiveTabs.get(tabId);
     if (!entry) {
@@ -1042,6 +1090,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     clearTimeout(entry.timeoutId);
     imageActiveTabs.delete(tabId);
+    await saveImageTabs().catch(() => {});
     await postImageResult(entry.queryId, message.data);
     sendResponse({ received: true });
 
@@ -1084,6 +1133,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     if (imgEntry) {
       clearTimeout(imgEntry.timeoutId);
       imageActiveTabs.delete(tabId);
+      await saveImageTabs().catch(() => {});
       await postImageResult(imgEntry.queryId, {
         images: [],
         error: "tab_closed_externally",

@@ -1,0 +1,33 @@
+{
+  "name": "google-ai-scraper",
+  "version": "0.0.0-dev",
+  "description": "MCP server that returns Google AI Overviews as clean Markdown. Thin launcher for the google-ai-scraper PyPI package (needs uv or pipx).",
+  "bin": {
+    "google-ai-scraper": "bin/cli.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "google",
+    "ai-overview",
+    "claude-code",
+    "cursor"
+  ],
+  "license": "MIT",
+  "author": "Bala Kumar",
+  "homepage": "https://github.com/balakumardev/google-ai-scraper",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/balakumardev/google-ai-scraper.git",
+    "directory": "npm"
+  },
+  "bugs": {
+    "url": "https://github.com/balakumardev/google-ai-scraper/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

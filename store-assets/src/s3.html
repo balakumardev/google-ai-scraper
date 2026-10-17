@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="base.css"><style>
+.l{position:absolute;left:64px;top:210px;width:470px}
+.r{position:absolute;left:580px;top:150px;width:640px}
+.term pre{font-size:19px}
+.steps{margin-top:30px;display:flex;flex-direction:column;gap:14px}
+.step{display:flex;align-items:center;gap:14px;font-size:20px;color:#1e293b;font-weight:550}
+.step b{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--indigo),var(--blue));color:#fff;display:grid;place-items:center;font-size:17px}
+.works{position:absolute;left:580px;top:590px;width:640px;display:flex;gap:10px;flex-wrap:wrap}
+</style></head><body>
+<div class="brand"><img src="../dist/icon-128.png">Google AI Overview Scraper</div>
+<div class="l"><h1>One command to <em>set up</em></h1>
+<div class="steps"><div class="step"><b>1</b>Install this extension</div><div class="step"><b>2</b>Run the local server</div><div class="step"><b>3</b>Add it to your MCP config</div></div></div>
+<div class="r term">
+<div class="bar"><b></b><b></b><b></b><span>terminal &middot; .mcp.json</span></div>
+<pre class="mono"><span class="c">$</span> <span class="y">uvx</span> google-ai-scraper
+
+<span class="c"># .mcp.json</span>
+{
+  <span class="k">"mcpServers"</span>: {
+    <span class="k">"google-ai-scraper"</span>: {
+      <span class="k">"command"</span>: <span class="s">"uvx"</span>,
+      <span class="k">"args"</span>: [<span class="s">"google-ai-scraper"</span>]
+    }
+  }
+}</pre></div>
+<div class="works"><span class="chip"><i></i>Claude Code</span><span class="chip"><i class="p"></i>Claude Desktop</span><span class="chip"><i class="c"></i>Cursor</span><span class="chip"><i class="g"></i>Any MCP client</span></div>
+<div class="foot"></div></body></html>

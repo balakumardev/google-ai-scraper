@@ -1,0 +1,23 @@
+{
+  "version": {
+    "license": "MIT"
+  },
+  "categories": {
+    "firefox": [
+      "other"
+    ]
+  },
+  "requires_payment": false,
+  "homepage": {
+    "en-US": "https://github.com/balakumardev/google-ai-scraper"
+  },
+  "support_url": {
+    "en-US": "https://github.com/balakumardev/google-ai-scraper/issues"
+  },
+  "summary": {
+    "en-US": "Google AI Overviews as clean Markdown with citations, for Claude Code, Cursor and any MCP client. No API keys, 100% local."
+  },
+  "developer_comments": {
+    "en-US": "This add-on only talks to localhost and google.com. It opens background search tabs, extracts Google AI Overview output into markdown with citations, and sends the result back to the user's local MCP/HTTP server."
+  }
+}

@@ -90,7 +90,7 @@ def path(p):
 addon_url = f"{BASE}/addons/addon/{ADDON}/"
 
 # 1) Long description (JSON, localized; AMO renders Markdown) ------------------
-desc = open(path("description.txt"), encoding="utf-8").read().strip()
+desc = open(path("listing/description.txt"), encoding="utf-8").read().strip()
 r = req("PATCH", addon_url, json_body={"description": {"en-US": desc}, "default_locale": "en-US"}, json_ct=True)
 print(f"[description] PATCH -> {r.status_code}")
 if r.status_code >= 400:
@@ -98,7 +98,7 @@ if r.status_code >= 400:
 time.sleep(PACE)
 
 # 2) Add-on icon (multipart; square PNG, AMO resizes to 32/64/128) ------------
-r = req("PATCH", addon_url, filefields={"icon": ("icon.png", path("icon-512.png"), "image/png")})
+r = req("PATCH", addon_url, filefields={"icon": ("icon.png", path("dist/icon-512.png"), "image/png")})
 print(f"[icon] PATCH -> {r.status_code}")
 if r.status_code >= 400:
     errors.append("icon"); print(r.text[:1000])
@@ -113,10 +113,10 @@ for p in existing:
     print(f"  delete {p['id']} -> {dr.status_code}")
     time.sleep(PACE)
 
-shots = ["shot1.png", "shot2.png", "shot3.png"]
+shots = [f"dist/screenshot-{i}.png" for i in range(1, 6)]
 for i, fname in enumerate(shots):
     r = req("POST", f"{addon_url}previews/",
-            filefields={"image": (fname, path(fname), "image/png")}, data={"position": i})
+            filefields={"image": (os.path.basename(fname), path(fname), "image/png")}, data={"position": i})
     print(f"[screenshot {i}] {fname} POST -> {r.status_code}")
     if r.status_code >= 400:
         errors.append(fname); print(r.text[:1000])
