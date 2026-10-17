@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: publish-firefox-extension
+  group: amo-api
   cancel-in-progress: false
 
 jobs:
@@ -58,20 +58,30 @@ jobs:
           AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
           AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
         run: |
-          web-ext sign \
-            --source-dir firefox-extension \
-            --artifacts-dir web-ext-artifacts \
-            --api-key "$AMO_JWT_ISSUER" \
-            --api-secret "$AMO_JWT_SECRET" \
-            --channel listed \
-            --amo-metadata=store-assets/amo-metadata.json
+          # AMO throttles API writes per account (HTTP 429, "Expected available in N seconds"), so retry.
+          for attempt in 1 2 3 4; do
+            if web-ext sign \
+              --source-dir firefox-extension \
+              --artifacts-dir web-ext-artifacts \
+              --api-key "$AMO_JWT_ISSUER" \
+              --api-secret "$AMO_JWT_SECRET" \
+              --channel listed \
+              --approval-timeout 0 \
+              --amo-metadata=store-assets/amo-metadata.json; then
+              exit 0
+            fi
+            echo "Sign attempt $attempt failed; retrying in 90s..."
+            sleep 90
+          done
+          echo "web-ext sign failed after 4 attempts" >&2
+          exit 1
 
-      - name: Upload signed XPI artifact
+      - name: Upload built package
         uses: actions/upload-artifact@v4
         with:
-          name: firefox-extension-xpi-${{ steps.bump.outputs.new }}
-          path: web-ext-artifacts/*.xpi
-          if-no-files-found: error
+          name: firefox-extension-${{ steps.bump.outputs.new }}
+          path: web-ext-artifacts/*
+          if-no-files-found: ignore
 
       - name: Commit version bump
         run: |

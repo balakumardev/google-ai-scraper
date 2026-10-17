@@ -21,7 +21,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: amo-listing
+  group: amo-api
   cancel-in-progress: false
 
 jobs:
