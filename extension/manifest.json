@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Google AI Overview Scraper",
-  "version": "2.11",
+  "version": "2.12",
   "description": "Google AI Overviews as clean Markdown with citations for Claude Code, Cursor & MCP clients. No API keys, 100% local.",
   "permissions": ["tabs", "scripting", "alarms", "storage"],
   "host_permissions": [
