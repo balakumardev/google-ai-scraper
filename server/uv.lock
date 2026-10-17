@@ -245,7 +245,7 @@ wheels = [
 
 [[package]]
 name = "google-ai-scraper"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
@@ -258,7 +258,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.0" },
-    { name = "mcp", specifier = ">=1.0.0" },
+    { name = "mcp", specifier = ">=1.0.0,<2" },
     { name = "uvicorn", specifier = ">=0.32.0" },
 ]
 
