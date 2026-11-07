@@ -13,19 +13,21 @@ from pydantic import BaseModel
 from google_ai_scraper import __version__
 
 THREAD_TTL = 120  # seconds of inactivity before auto-cleanup
+PARKED_THREAD_TTL = 1800  # closed-tab threads stay resumable by URL this long
 EXTENSION_RECENT_POLL_THRESHOLD = 75.0  # MV3 workers can sleep between alarm wakeups
 QUERY_TIMEOUT = 110.0  # seconds — covers MV3 wake latency plus background tab timeout
 IMAGE_QUERY_TIMEOUT = 220.0  # seconds — covers MV3 wake latency plus image generation
 
 
 class Thread:
-    __slots__ = ("thread_id", "created_at", "last_activity", "busy")
+    __slots__ = ("thread_id", "created_at", "last_activity", "busy", "parked")
 
     def __init__(self, thread_id: str):
         self.thread_id = thread_id
         self.created_at = time.monotonic()
         self.last_activity = time.monotonic()
         self.busy = False
+        self.parked = False
 
 
 class PendingQuery:
@@ -76,7 +78,7 @@ async def _cleanup_expired_threads():
         expired = [
             tid
             for tid, t in active_threads.items()
-            if not t.busy and (now - t.last_activity) > THREAD_TTL
+            if not t.busy and (now - t.last_activity) > (PARKED_THREAD_TTL if t.parked else THREAD_TTL)
         ]
         for tid in expired:
             active_threads.pop(tid, None)
@@ -158,6 +160,7 @@ async def health():
         "pending": len(pending_queries),
         "queued": len(query_queue),
         "active_threads": len(active_threads),
+        "parked_threads": sum(1 for t in active_threads.values() if t.parked),
         "pending_images": len(pending_image_queries),
         "image_queue": len(image_queue),
         "extension_connected": extension_status == "connected",
@@ -182,6 +185,7 @@ async def ask(q: str, thread_id: str | None = None, close_thread: bool = False, 
         if thread.busy:
             raise HTTPException(409, "thread is busy with another query")
         thread.busy = True
+        thread.parked = False
     else:
         thread = None
 
@@ -210,7 +214,10 @@ async def ask(q: str, thread_id: str | None = None, close_thread: bool = False, 
             thread.busy = False
             thread.last_activity = time.monotonic()
         if close_thread and thread:
-            active_threads.pop(pq.thread_id, None)
+            if pq.result and not pq.result.get("error"):
+                thread.parked = True
+            else:
+                active_threads.pop(pq.thread_id, None)
             close_queue.append(pq.thread_id)
 
     return {

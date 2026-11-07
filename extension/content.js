@@ -99,6 +99,8 @@
   const EXTRACTION_POLL_INTERVAL = 500;
   const EXTRACTION_STABILITY_DELAY = 3000;
   const FOLLOW_UP_INPUT_SETTLE_DELAY = 300;
+  const RESUME_RENDER_TIMEOUT = 15000;
+  const RESUME_STABLE_DELAY = 1000;
 
   let followUpInProgress = false;
 
@@ -577,11 +579,15 @@
   }
 
   // --- Initial scrape ---
-  waitForExtraction(
-    tryExtractInitialOverview,
-    (result) => sendResult(result),
-    "no_ai_overview"
-  );
+  // A resumed tab reopens an earlier conversation only to ask a follow-up.
+  const isResumedThread = window.location.hash === "#_resume";
+  if (!isResumedThread) {
+    waitForExtraction(
+      tryExtractInitialOverview,
+      (result) => sendResult(result),
+      "no_ai_overview"
+    );
+  }
 
   // --- Follow-up query handler ---
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -605,6 +611,9 @@
   async function handleFollowUp(query, queryId) {
     try {
       // 1. Find the follow-up input (textarea or contenteditable div)
+      if (isResumedThread) {
+        await waitForResumedConversation();
+      }
       let textbox = findFollowUpInput();
 
       // If not visible, try clicking an expand/show-more button
@@ -652,6 +661,9 @@
       );
 
       // 3. Type query into input
+      const usableButtonsBefore = new Set(
+        [...followUpButtonScope(textbox).querySelectorAll("button")].filter(isUsableButton)
+      );
       textbox.focus();
       if (textbox.tagName === "TEXTAREA" || textbox.tagName === "INPUT") {
         // Native input: set value and fire input event
@@ -677,7 +689,7 @@
       await new Promise((r) => setTimeout(r, FOLLOW_UP_INPUT_SETTLE_DELAY));
 
       // 4. Submit: find nearby submit button or press Enter
-      const submitted = await submitFollowUp(textbox);
+      const submitted = await submitFollowUp(textbox, usableButtonsBefore);
       if (!submitted) {
         chrome.runtime.sendMessage({
           type: "AI_OVERVIEW_RESULT",
@@ -712,6 +724,22 @@
     }
   }
 
+  async function waitForResumedConversation() {
+    const deadline = Date.now() + RESUME_RENDER_TIMEOUT;
+    let lastCount = -1;
+    let stableSince = 0;
+    while (Date.now() < deadline) {
+      const count = document.querySelectorAll('[data-container-id="main-col"]').length;
+      if (count > 0 && count === lastCount && findFollowUpInput()) {
+        if (Date.now() - stableSince >= RESUME_STABLE_DELAY) return;
+      } else {
+        lastCount = count;
+        stableSince = Date.now();
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
   function findFollowUpInput() {
     // Strategy 1: textarea with relevant placeholder/label
     const textarea = document.querySelector(
@@ -733,10 +761,39 @@
       if (ta && ta.offsetParent !== null) return ta;
     }
 
-    return null;
+    // Strategy 4: labels are localized, so fall back to the last visible
+    // textarea that is not the regular search box.
+    const visible = [...document.querySelectorAll("textarea")].filter(
+      (ta) => ta.offsetParent !== null && ta.name !== "q"
+    );
+    return visible[visible.length - 1] || null;
   }
 
-  async function submitFollowUp(textbox) {
+  function isUsableButton(btn) {
+    return (
+      btn.offsetParent !== null &&
+      !btn.disabled &&
+      btn.getAttribute("aria-disabled") !== "true"
+    );
+  }
+
+  function followUpButtonScope(textbox) {
+    let scope = textbox;
+    for (let i = 0; i < 4 && scope.parentElement; i++) scope = scope.parentElement;
+    return scope;
+  }
+
+  async function submitFollowUp(textbox, usableButtonsBefore) {
+    // Strategy 0: the send button becomes usable only once there is text,
+    // which identifies it without relying on localized labels.
+    const appeared = [...followUpButtonScope(textbox).querySelectorAll("button")].filter(
+      (btn) => isUsableButton(btn) && !usableButtonsBefore.has(btn)
+    );
+    if (appeared.length === 1) {
+      appeared[0].click();
+      return true;
+    }
+
     // Strategy 1: find a Send/Submit button nearby (walk up a few levels)
     let parent = textbox.parentElement;
     for (let i = 0; i < 5 && parent; i++) {
@@ -760,20 +817,7 @@
       }
     }
 
-    // Strategy 3: look for any nearby button with SVG icon (common submit pattern)
-    parent = textbox.parentElement?.parentElement?.parentElement;
-    if (parent) {
-      const buttons = parent.querySelectorAll("button");
-      for (const btn of buttons) {
-        if (/cancel|close|clear/i.test(btn.textContent)) continue;
-        if (btn.querySelector("svg") || btn.textContent.trim() === "") {
-          btn.click();
-          return true;
-        }
-      }
-    }
-
-    // Strategy 4: dispatch Enter key
+    // Strategy 3: dispatch Enter key
     textbox.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "Enter",

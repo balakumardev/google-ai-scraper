@@ -14,6 +14,9 @@ const ALARM_NAME = "poll-server";
 const GOOGLE_ACCOUNT_SCAN_LIMIT = 10;
 const GOOGLE_ACCOUNT_CACHE_TTL = 12 * 60 * 60 * 1000;
 const SERVER_HEALTH_TIMEOUT = 3000;
+const PARKED_THREAD_TTL = 30 * 60 * 1000;
+const RESUME_HASH = "#_resume";
+const RESUME_READY_TIMEOUT = 20000;
 
 let serverUrl = DEFAULT_SERVER;
 let googleAuthUser = 0;
@@ -27,7 +30,8 @@ let accountRefreshInFlight = null;
 const activeTabs = new Map();
 // Map<tabId, {queryId, deadlineAt, timeoutId}> — also persisted to chrome.storage.session
 const imageActiveTabs = new Map();
-// Map<threadId, {tabId, authuser, fast}> — also persisted to chrome.storage.session
+// Map<threadId, {tabId, authuser, fast, url, parkedAt}> — also persisted to chrome.storage.session.
+// A parked thread has tabId === null: its tab was closed and url reopens the conversation.
 let threadTabs = new Map();
 let pollInFlight = false;
 let isInitialized = false;
@@ -214,12 +218,15 @@ function parseThreadTabRecord(value) {
     return { tabId: value, authuser: 0, fast: false };
   }
   if (value && typeof value === "object") {
-    const tabId = Number(value.tabId);
-    if (!Number.isInteger(tabId)) return null;
+    const url = typeof value.url === "string" ? value.url : null;
+    const tabId = value.tabId === null ? null : Number(value.tabId);
+    if (tabId === null ? !url : !Number.isInteger(tabId)) return null;
     return {
       tabId,
       authuser: normalizeAccountIndex(value.authuser, 0),
       fast: Boolean(value.fast),
+      url,
+      parkedAt: normalizeTimestamp(value.parkedAt, 0),
     };
   }
   return null;
@@ -508,6 +515,8 @@ async function saveThreadTabs() {
       tabId: info.tabId,
       authuser: info.authuser,
       fast: info.fast,
+      url: info.url ?? null,
+      parkedAt: info.parkedAt ?? 0,
     };
   }
   await chrome.storage.session.set({ threadTabs: obj });
@@ -676,6 +685,9 @@ async function pollServer() {
           await closeThread(threadId);
         }
       }
+      if (pruneParkedThreads()) {
+        await saveThreadTabs();
+      }
 
       // Dispatch query
       if (data.query_id && data.query) {
@@ -742,9 +754,56 @@ async function handleNewQuery(data, { fast = false, authuser = null } = {}) {
   }
 }
 
+async function resumeParkedThread(threadId, threadInfo) {
+  const tab = await chrome.tabs.create({ url: threadInfo.url + RESUME_HASH, active: false });
+  const resumed = { ...threadInfo, tabId: tab.id, parkedAt: 0 };
+  threadTabs.set(threadId, resumed);
+  await saveThreadTabs();
+  return resumed;
+}
+
+// The content script of a freshly opened tab starts listening only after
+// document_idle, so retry until it accepts the message.
+async function sendFollowUpWhenReady(tabId, message) {
+  const deadline = Date.now() + RESUME_READY_TIMEOUT;
+  for (;;) {
+    try {
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch (err) {
+      if (Date.now() > deadline) throw err;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+}
+
+function pruneParkedThreads() {
+  const now = Date.now();
+  let changed = false;
+  for (const [threadId, info] of threadTabs.entries()) {
+    if (info.tabId === null && now - info.parkedAt > PARKED_THREAD_TTL) {
+      threadTabs.delete(threadId);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 async function handleFollowUp(data) {
   await ensureInitialized();
-  const threadInfo = threadTabs.get(data.thread_id);
+  let threadInfo = threadTabs.get(data.thread_id);
+
+  if (threadInfo && threadInfo.tabId === null) {
+    try {
+      threadInfo = await resumeParkedThread(data.thread_id, threadInfo);
+    } catch (err) {
+      await postResult(data.query_id, {
+        markdown: "",
+        citations: [],
+        error: `thread_resume_failed: ${err.message}`,
+      });
+      return;
+    }
+  }
 
   if (!threadInfo) {
     await postResult(data.query_id, {
@@ -780,7 +839,7 @@ async function handleFollowUp(data) {
 
   // Send follow-up to content script
   try {
-    const response = await chrome.tabs.sendMessage(threadInfo.tabId, {
+    const response = await sendFollowUpWhenReady(threadInfo.tabId, {
       type: "FOLLOW_UP_QUERY",
       query: data.query,
       queryId: data.query_id,
@@ -841,12 +900,35 @@ async function postResult(queryId, data) {
   });
 }
 
+function stripResumeHash(url) {
+  return url.endsWith(RESUME_HASH) ? url.slice(0, -RESUME_HASH.length) : url;
+}
+
 async function closeThread(threadId) {
   await ensureInitialized();
   const threadInfo = threadTabs.get(threadId);
-  threadTabs.delete(threadId);
+  // First close of a live tab parks the thread (the server keeps it resumable);
+  // a close of an already parked thread means the server expired it.
+  let tabUrl = null;
+  if (threadInfo && threadInfo.tabId !== null) {
+    try {
+      tabUrl = (await chrome.tabs.get(threadInfo.tabId)).url || null;
+    } catch {
+      // Tab may already be closed
+    }
+  }
+  if (tabUrl && new URL(tabUrl).searchParams.get("udm") === "50") {
+    threadTabs.set(threadId, {
+      ...threadInfo,
+      tabId: null,
+      url: stripResumeHash(tabUrl),
+      parkedAt: Date.now(),
+    });
+  } else {
+    threadTabs.delete(threadId);
+  }
   await saveThreadTabs();
-  if (threadInfo) {
+  if (threadInfo && threadInfo.tabId !== null) {
     const entry = await clearActiveTab(threadInfo.tabId);
     if (entry) {
       clearQueryRetryState(entry.queryId);

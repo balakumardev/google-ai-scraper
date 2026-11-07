@@ -334,7 +334,7 @@ async def _request(method: str, path: str, **kwargs) -> dict:
 
 @mcp.tool()
 async def search(query: str, mode: str = "pro", authuser: int | None = None) -> str:
-    """Search Google AI Overview. Returns markdown + citations + thread_id for follow-ups. Threads auto-expire after 2 min inactivity.
+    """Search Google AI Overview. Returns markdown + citations + thread_id for follow-ups. Threads auto-expire after 2 min inactivity (30 min when GOOGLE_AI_SCRAPER_CLOSE_AFTER_SEARCH is set).
 
     Args:
         query: The search query.
@@ -358,7 +358,10 @@ async def search(query: str, mode: str = "pro", authuser: int | None = None) -> 
 @mcp.tool()
 async def follow_up(query: str, thread_id: str) -> str:
     """Continue a conversation in an existing thread. Use the thread_id from a previous search result."""
-    result = await _request("GET", "/ask", params={"q": query, "thread_id": thread_id})
+    params = {"q": query, "thread_id": thread_id}
+    if CLOSE_AFTER_SEARCH:
+        params["close_thread"] = "true"
+    result = await _request("GET", "/ask", params=params)
     return json.dumps(result, indent=2)
 
 
