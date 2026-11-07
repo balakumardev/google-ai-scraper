@@ -333,6 +333,11 @@
     hidden.forEach((el) => el.removeAttribute("data-gas-hidden"));
     holders.forEach((holder) => holder.removeAttribute("data-gas-math"));
     clone.querySelectorAll("[data-gas-hidden]").forEach((el) => el.remove());
+    // Entity names in the answer are clickable chips (span role=button); keep
+    // their text before the UI-button cleanup removes every role=button.
+    clone.querySelectorAll('span[role="button"]').forEach((chip) => {
+      chip.replaceWith(document.createTextNode(chip.textContent));
+    });
     clone.querySelectorAll("[data-gas-math]").forEach((holder) => {
       const replacement = document.createElement("span");
       replacement.textContent = mathTexts[Number(holder.getAttribute("data-gas-math"))];
