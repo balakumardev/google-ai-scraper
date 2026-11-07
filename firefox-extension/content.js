@@ -265,9 +265,6 @@
     return Boolean(mainCol?.querySelector("[data-snt]"));
   }
 
-  // The answer DOM carries hidden UI text (copy toasts, share dialog, feedback
-  // form); computed style is only available on the live tree, so hidden
-  // elements are tagged there and dropped from the clone.
   // Google draws formulas as an aria-hidden SVG of positioned glyphs: a raised
   // glyph (negative translate y) is a superscript, a lowered one a subscript.
   function mathSvgToText(svg) {
@@ -304,6 +301,20 @@
     return copy.textContent.normalize("NFKC");
   }
 
+  // The footer of an answer holds the rating buttons, the legal links and the
+  // AI disclaimer. Its legal links live in a hidden menu, so it is recognised
+  // on the live tree, before hidden elements are dropped.
+  function isAnswerFooter(el) {
+    return Boolean(
+      el.querySelector(
+        '[data-snt], a[href*="policies.google.com"], a[href*="support.google.com/websearch"]'
+      )
+    );
+  }
+
+  // The answer DOM carries hidden UI text (copy toasts, share dialog, feedback
+  // form); computed style is only available on the live tree, so hidden
+  // elements and the footer are tagged there and dropped from the clone.
   function cloneVisible(root) {
     // A formula can be split into nested holders; only the innermost ones carry
     // the drawing, outer ones are plain layout.
@@ -328,6 +339,9 @@
       for (const child of el.children) visit(child);
     };
     for (const child of root.children) visit(child);
+    const wrapper =
+      root.querySelector('[data-container-id="main-col"]')?.children[0] || root.children[0];
+    hidden.push(...[...(wrapper?.children || [])].filter(isAnswerFooter));
     hidden.forEach((el) => el.setAttribute("data-gas-hidden", ""));
     const clone = root.cloneNode(true);
     hidden.forEach((el) => el.removeAttribute("data-gas-hidden"));
@@ -346,54 +360,70 @@
     return clone;
   }
 
+  // A code block is a header row (language label, then the pre) followed by a
+  // row with the copy button and a "use code with caution" caption.
+  function convertCodeBlocks(root) {
+    for (const pre of root.querySelectorAll("pre")) {
+      const header = pre.parentElement?.parentElement;
+      const isCodeHeader = header?.children.length === 2;
+      const label = isCodeHeader ? [...header.children].find((child) => !child.contains(pre)) : null;
+      const language = (label?.textContent || "").trim();
+      const code = document.createElement("code");
+      if (/^[\w#+.-]{1,20}$/.test(language)) {
+        code.className = `language-${language.toLowerCase()}`;
+        label.remove();
+      }
+      code.textContent = pre.textContent;
+      pre.replaceChildren(code);
+      const caption = isCodeHeader ? header.nextElementSibling : null;
+      if (
+        caption &&
+        caption.querySelector("button") &&
+        !caption.querySelector("pre") &&
+        caption.textContent.trim().length < 120
+      ) {
+        caption.remove();
+      }
+    }
+  }
+
+  function echoKey(text) {
+    return (text || "").toLowerCase().replace(/\s+/g, " ").replace(/[\s?!.¿¡]+$/u, "").trim();
+  }
+
+  // Turns a cloneVisible() copy of an answer into markdown. A heading that only
+  // repeats the question is dropped; every other heading is a real section.
+  function answerMarkdown(clone, question) {
+    stripNonContentElements(clone);
+    convertCodeBlocks(clone);
+    clone
+      .querySelectorAll('[data-dtype], button, [role="button"], svg, [data-subtree="aimba"]')
+      .forEach((el) => el.remove());
+
+    // Source card clusters: many links and images among the wrapper's children
+    const wrapper =
+      clone.querySelector('[data-container-id="main-col"]')?.children[0] || clone.children[0] || clone;
+    for (const child of [...wrapper.children]) {
+      if (child.querySelectorAll("a").length > 3 && child.querySelectorAll("img").length > 3) {
+        child.remove();
+      }
+    }
+    clone.querySelectorAll('img[src^="data:"]').forEach((el) => el.remove());
+
+    const firstHeading = clone.querySelector('h2, h3, [role="heading"]');
+    if (firstHeading && question && echoKey(firstHeading.textContent) === echoKey(question)) {
+      firstHeading.remove();
+    }
+
+    // Adjacent bold runs come out as "**a****b**"
+    return createTurndownService().turndown(clone.innerHTML).replace(/\*{4}/g, "").trim();
+  }
+
   function extractContent(container) {
     // Use main-col for markdown (AI response only), fall back to full container
     const mainCol = container.querySelector('[data-container-id="main-col"]');
-    const contentSource = mainCol || container;
-    const clone = cloneVisible(contentSource);
-
-    stripNonContentElements(clone);
-
-    // Strip UI elements: buttons, SVGs, badges
-    clone
-      .querySelectorAll('[data-dtype], button, [role="button"], svg')
-      .forEach((el) => el.remove());
-
-    // Remove inline source attribution blocks
-    clone
-      .querySelectorAll('[data-subtree="aimba"]')
-      .forEach((el) => el.remove());
-
-    // Remove source card clusters and feedback section from wrapper children
-    // Walk the wrapper's direct children to avoid removing parent containers
-    const wrapper = clone.querySelector('[data-container-id="main-col"]')
-      ? clone.querySelector('[data-container-id="main-col"]').children[0]
-      : clone.children[0] || clone;
-    const toRemove = [];
-    for (const child of wrapper?.children || []) {
-      const links = child.querySelectorAll("a").length;
-      const imgs = child.querySelectorAll("img").length;
-      // Source card clusters: many links + images, little unique text
-      if (links > 3 && imgs > 3) {
-        toRemove.push(child);
-        continue;
-      }
-      // Feedback/privacy section
-      if (child.querySelector('a[href*="policies.google.com"]')) {
-        toRemove.push(child);
-      }
-    }
-    toRemove.forEach((el) => el.remove());
-
-    // Remove base64 placeholder images (1x1 transparent GIFs used for math)
-    clone.querySelectorAll('img[src^="data:"]').forEach((el) => el.remove());
-
-    // Remove only the first heading (query title), keep section headings
-    const firstHeading = clone.querySelector('h2, h3, [role="heading"]');
-    if (firstHeading) firstHeading.remove();
-
-    const td = createTurndownService();
-    const markdown = td.turndown(clone.innerHTML).trim();
+    const question = new URLSearchParams(window.location.search).get("q") || "";
+    const markdown = answerMarkdown(cloneVisible(mainCol || container), question);
     const citations = extractCitations(container);
 
     return { markdown, citations, complete: isAnswerComplete(mainCol) };
@@ -613,44 +643,7 @@
       if (detectQuotaExhaustion(newAimc || newMainCol)) {
         return buildQuotaExhaustedResult(query);
       }
-      const tempContainer = cloneVisible(newMainCol);
-
-      stripNonContentElements(tempContainer);
-
-      // Apply same cleanup as extractContent
-      tempContainer
-        .querySelectorAll(
-          '[data-dtype], button, [role="button"], svg, [data-subtree="aimba"]'
-        )
-        .forEach((el) => el.remove());
-      tempContainer
-        .querySelectorAll('img[src^="data:"]')
-        .forEach((el) => el.remove());
-
-      // Remove source card clusters and feedback from wrapper children
-      const wrapper = tempContainer.children[0] || tempContainer;
-      const toRemove = [];
-      for (const child of wrapper?.children || []) {
-        const links = child.querySelectorAll("a").length;
-        const imgs = child.querySelectorAll("img").length;
-        if (links > 3 && imgs > 3) {
-          toRemove.push(child);
-          continue;
-        }
-        if (child.querySelector('a[href*="policies.google.com"]')) {
-          toRemove.push(child);
-        }
-      }
-      toRemove.forEach((el) => el.remove());
-
-      // Remove first heading (follow-up question echo)
-      const firstH = tempContainer.querySelector(
-        'h2, h3, [role="heading"]'
-      );
-      if (firstH) firstH.remove();
-
-      const td = createTurndownService();
-      const markdown = td.turndown(tempContainer.innerHTML).trim();
+      const markdown = answerMarkdown(cloneVisible(newMainCol), query);
       const allAimcs = document.querySelectorAll('[data-subtree="aimc"]');
       const lastAimc = allAimcs[allAimcs.length - 1];
       const citations = extractCitations(lastAimc || document.body);
