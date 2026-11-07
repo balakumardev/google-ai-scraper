@@ -160,8 +160,11 @@ def _spawn_backend_process(port: int):
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     if os.name == "nt":
+        # A venv python.exe is a launcher that starts the real interpreter as a
+        # child; under DETACHED_PROCESS that child opens a console window of its
+        # own, so give the tree a hidden console instead.
         kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
         )
     else:
         kwargs["start_new_session"] = True
