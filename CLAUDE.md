@@ -247,6 +247,7 @@ google-ai-scraper [--sse] [--no-server] [--backend] [--port PORT]
 | Variable | Default | Description |
 |---|---|---|
 | `GOOGLE_AI_SCRAPER_URL` | `http://127.0.0.1:15551` | FastAPI server URL (if running on a different port/host) |
+| `GOOGLE_AI_SCRAPER_CLOSE_AFTER_SEARCH` | off | `1` makes the `search` tool pass `close_thread=true`, so the tab closes right after the answer |
 
 ## Key Design Decisions
 

@@ -18,6 +18,7 @@ from google_ai_scraper import __version__
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 15551
 SERVER_URL = os.environ.get("GOOGLE_AI_SCRAPER_URL", f"http://{DEFAULT_HOST}:{DEFAULT_PORT}")
+CLOSE_AFTER_SEARCH = os.environ.get("GOOGLE_AI_SCRAPER_CLOSE_AFTER_SEARCH", "").lower() in ("1", "true", "yes")
 REQUEST_TIMEOUT = 75.0  # seconds — slightly above FastAPI query timeout
 IMAGE_REQUEST_TIMEOUT = 185.0  # seconds — image generation takes 1-2 min
 BACKEND_STARTUP_TIMEOUT = 10.0
@@ -348,6 +349,8 @@ async def search(query: str, mode: str = "pro", authuser: int | None = None) -> 
     params = {"q": query, "mode": mode}
     if authuser is not None:
         params["authuser"] = authuser
+    if CLOSE_AFTER_SEARCH:
+        params["close_thread"] = "true"
     result = await _request("GET", "/ask", params=params)
     return json.dumps(result, indent=2)
 

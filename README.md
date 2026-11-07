@@ -250,6 +250,7 @@ launchctl unload ~/Library/LaunchAgents/com.google-ai-scraper.plist
 | Environment Variable | Default | Description |
 |---|---|---|
 | `GOOGLE_AI_SCRAPER_URL` | `http://127.0.0.1:15551` | FastAPI backend URL for the MCP process |
+| `GOOGLE_AI_SCRAPER_CLOSE_AFTER_SEARCH` | off | `1` closes the search tab as soon as the answer is returned instead of keeping it for follow-ups for 2 min |
 
 ## Changing the FastAPI Port
 
