@@ -19,6 +19,8 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 15551
 SERVER_URL = os.environ.get("GOOGLE_AI_SCRAPER_URL", f"http://{DEFAULT_HOST}:{DEFAULT_PORT}")
 CLOSE_AFTER_SEARCH = os.environ.get("GOOGLE_AI_SCRAPER_CLOSE_AFTER_SEARCH", "").lower() in ("1", "true", "yes")
+SEARCH_MANY_MAX = 10
+SEARCH_MANY_CONCURRENCY = 5
 REQUEST_TIMEOUT = 75.0  # seconds — slightly above FastAPI query timeout
 IMAGE_REQUEST_TIMEOUT = 185.0  # seconds — image generation takes 1-2 min
 BACKEND_STARTUP_TIMEOUT = 10.0
@@ -332,8 +334,51 @@ async def _request(method: str, path: str, **kwargs) -> dict:
             return {"error": f"Server error ({resp.status_code}): {detail}"}
 
 
+ERROR_HINTS = {
+    "google_captcha": "Google asked for a CAPTCHA. Open https://www.google.com/search?udm=50&q=test in the browser, solve it, then retry.",
+    "tab_timeout": "Google did not finish an answer in time. Retry, or use mode='fast'.",
+    "no_ai_overview": "Google showed no AI answer for this query. Rephrase it as a question.",
+    "quota_exhausted_all_accounts": "Google AI Mode quota is used up on every signed-in account. Retry later or with mode='fast'.",
+    "follow_up_textbox_not_found": "The follow-up box was not found on the page. Start a new search instead.",
+    "thread_tab_not_found": "This thread is gone. Start a new search instead.",
+}
+
+
+def _dumps(result) -> str:
+    return json.dumps(result, ensure_ascii=False)
+
+
+async def _ask(params: dict) -> dict:
+    if CLOSE_AFTER_SEARCH:
+        params["close_thread"] = "true"
+    result = await _request("GET", "/ask", params=params)
+    error = result.get("error")
+    if error:
+        hint = ERROR_HINTS.get(error.split(":", 1)[0])
+        if hint:
+            result["hint"] = hint
+    return result
+
+
+def _search_params(query: str, mode: str, authuser: int | None, hl: str | None, gl: str | None) -> dict:
+    params = {"q": query, "mode": mode}
+    if authuser is not None:
+        params["authuser"] = authuser
+    if hl:
+        params["hl"] = hl
+    if gl:
+        params["gl"] = gl
+    return params
+
+
 @mcp.tool()
-async def search(query: str, mode: str = "pro", authuser: int | None = None) -> str:
+async def search(
+    query: str,
+    mode: str = "pro",
+    authuser: int | None = None,
+    hl: str | None = None,
+    gl: str | None = None,
+) -> str:
     """Search Google AI Overview. Returns markdown + citations + thread_id for follow-ups. Threads auto-expire after 2 min inactivity (30 min when GOOGLE_AI_SCRAPER_CLOSE_AFTER_SEARCH is set).
 
     Args:
@@ -345,24 +390,44 @@ async def search(query: str, mode: str = "pro", authuser: int | None = None) -> 
         authuser: Google account index (0, 1, 2, ...) to use for this search.
                   If omitted, uses the account selected in the browser extension.
                   On quota exhaustion, the extension auto-rotates through available accounts.
+        hl: Google interface language ("en", "ru", "pt-BR"). The answer itself follows the language
+            of the query, so ask in the language you want the answer in.
+        gl: Country to localize results for ("us", "de", "ru"): prices, availability, local news.
+            Default: the user's location.
     """
-    params = {"q": query, "mode": mode}
-    if authuser is not None:
-        params["authuser"] = authuser
-    if CLOSE_AFTER_SEARCH:
-        params["close_thread"] = "true"
-    result = await _request("GET", "/ask", params=params)
-    return json.dumps(result, indent=2)
+    return _dumps(await _ask(_search_params(query, mode, authuser, hl, gl)))
+
+
+@mcp.tool()
+async def search_many(
+    queries: list[str],
+    mode: str = "pro",
+    hl: str | None = None,
+    gl: str | None = None,
+) -> str:
+    """Run several independent searches in parallel, one browser tab each. Faster than calling search repeatedly.
+
+    Returns a JSON list with one result per query, in the same order; each has its own thread_id for follow-ups.
+
+    Args:
+        queries: 1 to 10 search queries.
+        mode, hl, gl: As in search, applied to every query.
+    """
+    if not 1 <= len(queries) <= SEARCH_MANY_MAX:
+        return _dumps({"error": f"queries must contain 1 to {SEARCH_MANY_MAX} items"})
+    limit = asyncio.Semaphore(SEARCH_MANY_CONCURRENCY)
+
+    async def one(query: str) -> dict:
+        async with limit:
+            return await _ask(_search_params(query, mode, None, hl, gl))
+
+    return _dumps(await asyncio.gather(*(one(q) for q in queries)))
 
 
 @mcp.tool()
 async def follow_up(query: str, thread_id: str) -> str:
     """Continue a conversation in an existing thread. Use the thread_id from a previous search result."""
-    params = {"q": query, "thread_id": thread_id}
-    if CLOSE_AFTER_SEARCH:
-        params["close_thread"] = "true"
-    result = await _request("GET", "/ask", params=params)
-    return json.dumps(result, indent=2)
+    return _dumps(await _ask({"q": query, "thread_id": thread_id}))
 
 
 @mcp.tool()
@@ -407,7 +472,7 @@ async def generate_image(prompt: str, save_path: str | None = None):
 async def health() -> str:
     """Check system status: server, extension connectivity, queue depth."""
     result = await _request("GET", "/health")
-    return json.dumps(result, indent=2)
+    return _dumps(result)
 
 
 def _parent_watchdog():

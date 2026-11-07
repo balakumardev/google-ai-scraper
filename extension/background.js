@@ -1,5 +1,6 @@
 const DEFAULT_SERVER = "http://localhost:15551";
 const POLL_INTERVAL = 1500;
+const LONG_POLL_WAIT_SECONDS = 20;
 // Firefox requires periodInMinutes >= 1; Chrome allows 0.5 for faster MV3 wake.
 const ALARM_WAKE_INTERVAL_MINUTES =
   typeof browser !== "undefined" &&
@@ -19,6 +20,7 @@ const RESUME_HASH = "#_resume";
 const RESUME_READY_TIMEOUT = 20000;
 
 let serverUrl = DEFAULT_SERVER;
+let searchWindowMode = "current"; // "current" | "offscreen"
 let googleAuthUser = 0;
 let googleAccounts = [0]; // available authuser indices for quota rotation
 let googleAccountProfiles = [];
@@ -414,12 +416,118 @@ async function refreshGoogleAccounts({ force = false } = {}) {
   return accountRefreshInFlight;
 }
 
+// --- Offscreen mode: searches load in iframes of an offscreen document ---
+// Google forbids framing its pages, so a session rule strips the framing
+// headers, only for frames outside any tab (that is, the offscreen document).
+
+const FRAME_HEADER_RULE_ID = 1;
+const OFFSCREEN_PARK_GRACE = 60000;
+// Map<queryId, {timeoutId, threadId, authuser, fast}>
+const offscreenQueries = new Map();
+let offscreenReady = null;
+
+function ensureOffscreenDocument() {
+  offscreenReady ??= (async () => {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [FRAME_HEADER_RULE_ID],
+      addRules: [{
+        id: FRAME_HEADER_RULE_ID,
+        priority: 1,
+        action: {
+          type: "modifyHeaders",
+          responseHeaders: [
+            { header: "x-frame-options", operation: "remove" },
+            { header: "content-security-policy", operation: "remove" },
+          ],
+        },
+        condition: {
+          requestDomains: ["www.google.com"],
+          resourceTypes: ["sub_frame"],
+          tabIds: [chrome.tabs.TAB_ID_NONE],
+        },
+      }],
+    });
+    const existing = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+    if (existing.length === 0) {
+      await chrome.offscreen.createDocument({
+        url: "offscreen.html",
+        reasons: ["DOM_SCRAPING"],
+        justification: "Load Google AI Mode answers without opening visible tabs",
+      });
+    }
+  })().catch((error) => {
+    offscreenReady = null;
+    throw error;
+  });
+  return offscreenReady;
+}
+
+// A frame lives for one answer: the conversation URL is parked, and a
+// follow-up reopens it with the question in the hash (_fq) for content.js.
+async function startOffscreenQuery(data, frameUrl, { authuser = 0, fast = false } = {}) {
+  await ensureOffscreenDocument();
+  offscreenQueries.set(data.query_id, {
+    timeoutId: setTimeout(
+      () => finishOffscreenQuery(data.query_id, { markdown: "", citations: [], error: "tab_timeout" }),
+      TAB_TIMEOUT
+    ),
+    threadId: data.thread_id,
+    authuser,
+    fast,
+  });
+  await chrome.runtime.sendMessage({
+    target: "offscreen",
+    type: "OPEN_FRAME",
+    url: frameUrl,
+    key: data.query_id,
+  });
+}
+
+function useOffscreen() {
+  return searchWindowMode === "offscreen" && Boolean(chrome.offscreen);
+}
+
+async function startOffscreenFollowUp(data, threadInfo) {
+  const hash = new URLSearchParams({ _resume: "1", _oq: data.query_id, _fq: data.query });
+  await startOffscreenQuery(data, `${threadInfo.url}#${hash}`, {
+    authuser: threadInfo.authuser,
+    fast: threadInfo.fast,
+  });
+}
+
+async function finishOffscreenQuery(queryId, result, pageUrl = null) {
+  const query = offscreenQueries.get(queryId);
+  if (!query) return;
+  clearTimeout(query.timeoutId);
+  offscreenQueries.delete(queryId);
+  if (pageUrl && !result.error) {
+    threadTabs.set(query.threadId, {
+      tabId: null,
+      authuser: query.authuser,
+      fast: query.fast,
+      url: stripHash(pageUrl),
+      parkedAt: Date.now(),
+    });
+    await saveThreadTabs();
+  }
+  await postResult(queryId, result).catch(() => {});
+  await chrome.runtime
+    .sendMessage({ target: "offscreen", type: "CLOSE_FRAME", key: queryId })
+    .catch(() => {});
+}
+
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (message.type !== "AI_OVERVIEW_RESULT" || sender.tab || !message.offscreenKey) return;
+  finishOffscreenQuery(message.offscreenKey, message.data, message.pageUrl);
+});
+
 // --- Server URL from options ---
 
 async function loadStoredState() {
   const [syncData, localData] = await Promise.all([
     chrome.storage.sync.get({
       serverUrl: DEFAULT_SERVER,
+      searchWindowMode: "current",
       googleAuthUser: 0,
       googleAccounts: [0],
     }),
@@ -431,6 +539,7 @@ async function loadStoredState() {
   ]);
 
   serverUrl = syncData.serverUrl;
+  searchWindowMode = syncData.searchWindowMode;
   setInMemoryAccountState(syncData.googleAuthUser, syncData.googleAccounts);
   setInMemoryAccountProfiles(
     localData.googleAccountProfiles,
@@ -443,6 +552,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "sync") {
     if (changes.serverUrl) {
       serverUrl = changes.serverUrl.newValue || DEFAULT_SERVER;
+    }
+    if (changes.searchWindowMode) {
+      searchWindowMode = changes.searchWindowMode.newValue || "current";
     }
     if (changes.googleAuthUser != null || changes.googleAccounts) {
       setInMemoryAccountState(
@@ -495,11 +607,13 @@ async function fetchServerHealth() {
   }
 }
 
-function buildSearchUrl(query, { fast = false, authuser = null, extra = "" } = {}) {
+function buildSearchUrl(query, { fast = false, authuser = null, hl = null, gl = null, extra = "" } = {}) {
   let url = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=50`;
   if (!fast) url += "&arv=1";
   const au = resolveSearchAuthUser(authuser);
   url += `&authuser=${au}`;
+  if (hl) url += `&hl=${encodeURIComponent(hl)}`;
+  if (gl) url += `&gl=${encodeURIComponent(gl)}`;
   if (extra) url += extra;
   return url;
 }
@@ -673,10 +787,17 @@ async function pollServer() {
   await ensureInitialized();
   if (pollInFlight) return;
   pollInFlight = true;
+  const pollStartedAt = Date.now();
+  let nextPollDelay = POLL_INTERVAL;
 
   try {
-    const resp = await fetch(`${serverUrl}/pending`);
+    const resp = await fetch(`${serverUrl}/pending?wait=${LONG_POLL_WAIT_SECONDS}`, {
+      signal: AbortSignal.timeout((LONG_POLL_WAIT_SECONDS + 5) * 1000),
+    });
     if (resp.ok) {
+      // A long-poll that was held by the server can be renewed at once; an
+      // instant empty answer (older server, no long-poll) keeps the interval.
+      nextPollDelay = Date.now() - pollStartedAt >= POLL_INTERVAL ? 0 : POLL_INTERVAL;
       const data = await resp.json();
 
       // Process thread closures first
@@ -691,10 +812,12 @@ async function pollServer() {
 
       // Dispatch query
       if (data.query_id && data.query) {
+        nextPollDelay = 0;
         if (data.pipeline === "image") {
           await handleImageQuery(data);
         } else if (data.type === "follow_up") {
-          await handleFollowUp(data);
+          // Not awaited: a resumed tab can take seconds to accept the message.
+          handleFollowUp(data).catch((error) => console.error("Follow-up failed", error));
         } else {
           await handleNewQuery(data, {
             fast: data.mode === "fast",
@@ -710,9 +833,9 @@ async function pollServer() {
   }
 
   // Supplement alarm with setTimeout for sub-minute responsiveness.
-  // If the service worker stays alive, this fires at 1.5s intervals.
+  // If the service worker stays alive, polls follow each other back to back.
   // If it goes idle, the alarm wakes it back up on the normal MV3 cadence.
-  setTimeout(pollServer, POLL_INTERVAL);
+  setTimeout(pollServer, nextPollDelay);
 }
 
 // Per-query retry state for quota rotation:
@@ -723,7 +846,19 @@ async function handleNewQuery(data, { fast = false, authuser = null } = {}) {
   await ensureInitialized();
   try {
     const effectiveAuthUser = resolveSearchAuthUser(authuser);
-    const url = buildSearchUrl(data.query, { fast, authuser: effectiveAuthUser });
+    const url = buildSearchUrl(data.query, {
+      fast,
+      authuser: effectiveAuthUser,
+      hl: data.hl,
+      gl: data.gl,
+    });
+    if (useOffscreen()) {
+      await startOffscreenQuery(data, `${url}#_oq=${data.query_id}`, {
+        authuser: effectiveAuthUser,
+        fast,
+      });
+      return true;
+    }
     const tab = await chrome.tabs.create({ url, active: false });
 
     threadTabs.set(data.thread_id, {
@@ -791,6 +926,19 @@ function pruneParkedThreads() {
 async function handleFollowUp(data) {
   await ensureInitialized();
   let threadInfo = threadTabs.get(data.thread_id);
+
+  if (threadInfo && threadInfo.tabId === null && useOffscreen()) {
+    try {
+      await startOffscreenFollowUp(data, threadInfo);
+    } catch (err) {
+      await postResult(data.query_id, {
+        markdown: "",
+        citations: [],
+        error: `thread_resume_failed: ${err.message}`,
+      });
+    }
+    return;
+  }
 
   if (threadInfo && threadInfo.tabId === null) {
     try {
@@ -900,15 +1048,25 @@ async function postResult(queryId, data) {
   });
 }
 
-function stripResumeHash(url) {
-  return url.endsWith(RESUME_HASH) ? url.slice(0, -RESUME_HASH.length) : url;
+function stripHash(url) {
+  const hashAt = url.indexOf("#");
+  return hashAt === -1 ? url : url.slice(0, hashAt);
 }
 
 async function closeThread(threadId) {
   await ensureInitialized();
   const threadInfo = threadTabs.get(threadId);
   // First close of a live tab parks the thread (the server keeps it resumable);
-  // a close of an already parked thread means the server expired it.
+  // a close of an already parked thread means the server expired it. Offscreen
+  // threads are parked as soon as their answer arrives, so the server's
+  // close_thread that follows within seconds must not drop them.
+  if (
+    threadInfo &&
+    threadInfo.tabId === null &&
+    Date.now() - threadInfo.parkedAt < OFFSCREEN_PARK_GRACE
+  ) {
+    return;
+  }
   let tabUrl = null;
   if (threadInfo && threadInfo.tabId !== null) {
     try {
@@ -921,7 +1079,7 @@ async function closeThread(threadId) {
     threadTabs.set(threadId, {
       ...threadInfo,
       tabId: null,
-      url: stripResumeHash(tabUrl),
+      url: stripHash(tabUrl),
       parkedAt: Date.now(),
     });
   } else {
@@ -977,6 +1135,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // Ignore malformed URLs
         }
       }
+      let hl = null;
+      let gl = null;
+      try {
+        const params = new URL(sender.tab.url).searchParams;
+        hl = params.get("hl");
+        gl = params.get("gl");
+      } catch {
+        // Ignore malformed URLs
+      }
       if (!query) {
         clearQueryRetryState(entry.queryId);
         await postResult(entry.queryId, { markdown: "", citations: [], error: "quota_exhausted_all_accounts" });
@@ -996,7 +1163,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (nextAccount !== undefined && !entry.fast) {
         console.log(`Quota exhausted on authuser=${entry.authuser}, trying authuser=${nextAccount}`, entry.queryId);
         const reopened = await handleNewQuery(
-          { query_id: entry.queryId, thread_id: entry.threadId, query },
+          { query_id: entry.queryId, thread_id: entry.threadId, query, hl, gl },
           { authuser: nextAccount }
         );
         if (reopened) {
@@ -1011,7 +1178,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         state.triedFast = true;
         console.log("All accounts exhausted on Pro, trying fast mode", entry.queryId);
         await handleNewQuery(
-          { query_id: entry.queryId, thread_id: entry.threadId, query },
+          { query_id: entry.queryId, thread_id: entry.threadId, query, hl, gl },
           { fast: true }
         );
         sendResponse({ received: true });
@@ -1186,6 +1353,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 // Clean up maps when a tab is closed externally
+// Google sends suspected bots to /sorry/, where no content script runs, so the
+// query fails at once instead of waiting for the tab timeout.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (!changeInfo.url?.startsWith("https://www.google.com/sorry/")) return;
+  (async () => {
+    await ensureInitialized();
+    const entry = await clearActiveTab(tabId);
+    if (!entry) return;
+    clearQueryRetryState(entry.queryId);
+    await postResult(entry.queryId, {
+      markdown: "",
+      citations: [],
+      error: "google_captcha",
+    }).catch(() => {});
+  })().catch(() => {});
+});
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   (async () => {
     await ensureInitialized();

@@ -117,6 +117,18 @@
       opacity: 0.75;
     }
 
+    select {
+      display: block;
+      width: 100%;
+      padding: 8px 12px;
+      font-size: 14px;
+      font-family: inherit;
+      color: var(--foreground);
+      background: var(--background);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
     .status {
       font-size: 13px;
       font-weight: 500;
@@ -133,19 +145,28 @@
 <body>
   <div class="header">
     <img src="icons/icon48.png" alt="">
-    <h1>Settings</h1>
+    <h1 data-i18n="settings"></h1>
   </div>
 
   <div class="field">
-    <label for="serverUrl">Server URL <span class="label-hint">(default: localhost:15551)</span></label>
+    <label for="serverUrl"><span data-i18n="serverUrlLabel"></span> <span class="label-hint" data-i18n="serverUrlHint"></span></label>
     <input type="url" id="serverUrl" placeholder="http://localhost:15551">
   </div>
 
-  <div class="actions">
-    <button id="save">Save</button>
-    <span id="status" class="status">Saved</span>
+  <div class="field">
+    <label for="searchWindowMode" data-i18n="searchWindowLabel"></label>
+    <select id="searchWindowMode">
+      <option value="current" data-i18n="modeCurrent"></option>
+      <option value="offscreen" data-i18n="modeOffscreen"></option>
+    </select>
   </div>
 
+  <div class="actions">
+    <button id="save" data-i18n="save"></button>
+    <span id="status" class="status" data-i18n="saved"></span>
+  </div>
+
+  <script src="i18n.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

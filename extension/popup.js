@@ -8,7 +8,7 @@ function sendRuntimeMessage(message) {
         return;
       }
       if (!response?.ok) {
-        reject(new Error(response?.error || "Unknown popup error"));
+        reject(new Error(response?.error || t("unknownPopupError")));
         return;
       }
       resolve(response);
@@ -18,39 +18,39 @@ function sendRuntimeMessage(message) {
 
 function formatRelativeTime(timestamp) {
   if (!timestamp) {
-    return "No cache yet";
+    return t("noCacheYet");
   }
 
   const diffMs = timestamp - Date.now();
   const diffMinutes = Math.round(diffMs / 60000);
   const diffHours = Math.round(diffMs / 3600000);
   const diffDays = Math.round(diffMs / 86400000);
-  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  const formatter = new Intl.RelativeTimeFormat(chrome.i18n.getUILanguage(), { numeric: "auto" });
 
   if (Math.abs(diffMinutes) < 1) {
-    return "Updated just now";
+    return t("updatedJustNow");
   }
   if (Math.abs(diffMinutes) < 60) {
-    return `Updated ${formatter.format(diffMinutes, "minute")}`;
+    return t("updatedAgo", [formatter.format(diffMinutes, "minute")]);
   }
   if (Math.abs(diffHours) < 24) {
-    return `Updated ${formatter.format(diffHours, "hour")}`;
+    return t("updatedAgo", [formatter.format(diffHours, "hour")]);
   }
-  return `Updated ${formatter.format(diffDays, "day")}`;
+  return t("updatedAgo", [formatter.format(diffDays, "day")]);
 }
 
 function getHealthPresentation(health) {
   if (!health) {
     return {
       tone: "checking",
-      label: "Checking server...",
+      label: t("checkingServer"),
     };
   }
 
   if (!health.ok) {
     return {
       tone: "disconnected",
-      label: health.error || "Server unreachable",
+      label: health.error || t("serverUnreachable"),
     };
   }
 
@@ -61,23 +61,23 @@ function getHealthPresentation(health) {
     return {
       tone: "connected",
       label: data.last_poll_age_seconds != null
-        ? `Connected \u00b7 polled ${data.last_poll_age_seconds}s ago`
-        : "Server & extension connected",
+        ? t("connectedPolled", [String(data.last_poll_age_seconds)])
+        : t("connected"),
     };
   }
 
   if (extensionStatus === "never_seen") {
     return {
       tone: "warning",
-      label: "Waiting for browser extension",
+      label: t("waitingExtension"),
     };
   }
 
   return {
     tone: "warning",
     label: data.last_poll_age_seconds != null
-      ? `Extension idle \u00b7 ${data.last_poll_age_seconds}s since last poll`
-      : "Extension hasn\u2019t checked in recently",
+      ? t("extensionIdle", [String(data.last_poll_age_seconds)])
+      : t("extensionNotCheckedIn"),
   };
 }
 
@@ -138,7 +138,7 @@ function renderSummary(state) {
   selectedAvatar.replaceChildren(...avatarNode.childNodes);
   selectedName.textContent = selected.name || selected.email;
   selectedEmail.textContent = selected.email;
-  summaryMeta.textContent = `${state.accounts.length} account${state.accounts.length === 1 ? "" : "s"}`;
+  summaryMeta.textContent = tPlural("accountsCount", state.accounts.length);
 }
 
 function renderBanner(state) {
@@ -198,9 +198,10 @@ function renderAccounts(state, onSelect) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.innerHTML = `
-      <div class="empty-title">No cached Google accounts</div>
-      <div class="empty-copy">Click refresh to scan your signed-in Google profiles. First scan may take up to a minute.</div>
+      <div class="empty-title" data-i18n="noAccountsTitle"></div>
+      <div class="empty-copy" data-i18n="noAccountsCopy"></div>
     `;
+    applyI18n(empty);
     content.appendChild(empty);
     return;
   }
@@ -232,7 +233,7 @@ function renderAccounts(state, onSelect) {
 
     const badge = document.createElement("span");
     badge.className = "account-badge";
-    badge.textContent = account.index === state.authuser ? "Active" : `authuser=${account.index}`;
+    badge.textContent = account.index === state.authuser ? t("badgeActive") : `authuser=${account.index}`;
 
     button.appendChild(avatar);
     button.appendChild(info);
@@ -243,7 +244,7 @@ function renderAccounts(state, onSelect) {
         const nextState = await onSelect(account);
         window.popupState = nextState;
         renderAll();
-        setStatusMessage(`Using ${account.email}`, "success", true);
+        setStatusMessage(t("usingAccount", [account.email]), "success", true);
       } catch (error) {
         setStatusMessage(error.message, "error");
       }
@@ -285,7 +286,7 @@ async function refreshAccounts({ showSuccessMessage = false } = {}) {
       isRefreshingAccounts: true,
     };
     renderAll();
-    setStatusMessage("Refreshing accounts\u2026", "neutral");
+    setStatusMessage(t("refreshingAccounts"), "neutral");
 
     const response = await sendRuntimeMessage({ type: "POPUP_REFRESH_ACCOUNTS" });
     window.popupState = response.state;
@@ -293,8 +294,8 @@ async function refreshAccounts({ showSuccessMessage = false } = {}) {
 
     if (showSuccessMessage) {
       const successText = window.popupState.accounts.length
-        ? "Accounts refreshed"
-        : "No accounts found";
+        ? t("accountsRefreshed")
+        : t("noAccountsFound");
       setStatusMessage(successText, "success", true);
     } else {
       setStatusMessage("");
@@ -312,7 +313,7 @@ async function refreshAccounts({ showSuccessMessage = false } = {}) {
 }
 
 async function loadInitialState() {
-  setStatusMessage("Loading accounts\u2026", "neutral");
+  setStatusMessage(t("loadingAccounts"), "neutral");
 
   const response = await sendRuntimeMessage({ type: "POPUP_GET_STATE" });
   window.popupState = response.state;

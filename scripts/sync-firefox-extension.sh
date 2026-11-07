@@ -17,7 +17,7 @@ copy_path() {
   fi
 }
 
-for rel in background.js content.js options.js options.html popup.js popup.html popup.css lib icons; do
+for rel in background.js content.js i18n.js options.js options.html popup.js popup.html popup.css lib icons _locales; do
   copy_path "$rel"
 done
 

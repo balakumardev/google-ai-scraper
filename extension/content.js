@@ -95,6 +95,15 @@
     return; // Don't run text extraction
   }
 
+  // Hash flags set by background.js, read before Google rewrites the URL:
+  // _resume reopens an earlier conversation only to ask a follow-up; _oq is
+  // the query id of a search run in an offscreen-document iframe and _fq the
+  // follow-up to ask there.
+  const hashParams = new URLSearchParams(window.location.hash.slice(1));
+  const isResumedThread = hashParams.has("_resume");
+  const inOffscreenFrame = window.top !== window && hashParams.has("_oq");
+  const offscreenKey = inOffscreenFrame ? hashParams.get("_oq") : null;
+
   const EXTRACTION_MAX_WAIT = 60000;
   const EXTRACTION_POLL_INTERVAL = 500;
   const EXTRACTION_STABILITY_DELAY = 3000;
@@ -250,11 +259,42 @@
       .forEach((el) => el.remove());
   }
 
+  // Google renders the rating buttons (data-snt) under an answer only once it
+  // has finished streaming, in every UI language.
+  function isAnswerComplete(mainCol) {
+    return Boolean(mainCol?.querySelector("[data-snt]"));
+  }
+
+  // The answer DOM carries hidden UI text (copy toasts, share dialog, feedback
+  // form); computed style is only available on the live tree, so hidden
+  // elements are tagged there and dropped from the clone.
+  function cloneVisible(root) {
+    const hidden = [];
+    const visit = (el) => {
+      const style = getComputedStyle(el);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        el.getAttribute("aria-hidden") === "true"
+      ) {
+        hidden.push(el);
+        return;
+      }
+      for (const child of el.children) visit(child);
+    };
+    for (const child of root.children) visit(child);
+    hidden.forEach((el) => el.setAttribute("data-gas-hidden", ""));
+    const clone = root.cloneNode(true);
+    hidden.forEach((el) => el.removeAttribute("data-gas-hidden"));
+    clone.querySelectorAll("[data-gas-hidden]").forEach((el) => el.remove());
+    return clone;
+  }
+
   function extractContent(container) {
     // Use main-col for markdown (AI response only), fall back to full container
     const mainCol = container.querySelector('[data-container-id="main-col"]');
     const contentSource = mainCol || container;
-    const clone = contentSource.cloneNode(true);
+    const clone = cloneVisible(contentSource);
 
     stripNonContentElements(clone);
 
@@ -300,7 +340,7 @@
     const markdown = td.turndown(clone.innerHTML).trim();
     const citations = extractCitations(container);
 
-    return { markdown, citations };
+    return { markdown, citations, complete: isAnswerComplete(mainCol) };
   }
 
   function hasMeaningfulMarkdown(markdown) {
@@ -337,10 +377,12 @@
     return `${markdown.trim()}\n---\n${citations.join("\n")}`;
   }
 
-  function sendResult(data) {
+  function sendResult({ complete, ...data }) {
     chrome.runtime.sendMessage({
       type: "AI_OVERVIEW_RESULT",
       data,
+      offscreenKey,
+      pageUrl: window.location.href,
     });
   }
 
@@ -398,6 +440,11 @@
         lastResult = result;
 
         if (isTerminalExtractionError(result.error)) {
+          finish(result);
+          return;
+        }
+
+        if (result.complete && !result.error) {
           finish(result);
           return;
         }
@@ -464,12 +511,11 @@
       return buildQuotaExhaustedResult(q);
     }
 
-    const { markdown, citations } = extractContent(container);
-    return finalizeExtractionResult(
-      markdown,
-      citations,
-      "empty_ai_overview_extraction"
-    );
+    const { markdown, citations, complete } = extractContent(container);
+    return {
+      ...finalizeExtractionResult(markdown, citations, "empty_ai_overview_extraction"),
+      complete,
+    };
   }
 
   function extractFollowUpSnapshot() {
@@ -511,7 +557,7 @@
       if (detectQuotaExhaustion(newAimc || newMainCol)) {
         return buildQuotaExhaustedResult(query);
       }
-      const tempContainer = newMainCol.cloneNode(true);
+      const tempContainer = cloneVisible(newMainCol);
 
       stripNonContentElements(tempContainer);
 
@@ -552,11 +598,10 @@
       const allAimcs = document.querySelectorAll('[data-subtree="aimc"]');
       const lastAimc = allAimcs[allAimcs.length - 1];
       const citations = extractCitations(lastAimc || document.body);
-      return finalizeExtractionResult(
-        markdown,
-        citations,
-        "empty_follow_up_extraction"
-      );
+      return {
+        ...finalizeExtractionResult(markdown, citations, "empty_follow_up_extraction"),
+        complete: isAnswerComplete(newMainCol),
+      };
     }
 
     const currentAimc =
@@ -579,8 +624,6 @@
   }
 
   // --- Initial scrape ---
-  // A resumed tab reopens an earlier conversation only to ask a follow-up.
-  const isResumedThread = window.location.hash === "#_resume";
   if (!isResumedThread) {
     waitForExtraction(
       tryExtractInitialOverview,
@@ -607,6 +650,11 @@
     handleFollowUp(message.query, message.queryId);
     sendResponse({ received: true });
   });
+
+  if (inOffscreenFrame && isResumedThread && hashParams.has("_fq")) {
+    followUpInProgress = true;
+    handleFollowUp(hashParams.get("_fq"), offscreenKey);
+  }
 
   async function handleFollowUp(query, queryId) {
     try {
@@ -636,14 +684,8 @@
       }
 
       if (!textbox) {
-        chrome.runtime.sendMessage({
-          type: "AI_OVERVIEW_RESULT",
-          data: {
-            markdown: "",
-            citations: [],
-            error: "follow_up_textbox_not_found",
-          },
-        });
+        sendResult({ markdown: "", citations: [], error: "follow_up_textbox_not_found" });
+        followUpInProgress = false;
         return;
       }
 
@@ -691,14 +733,8 @@
       // 4. Submit: find nearby submit button or press Enter
       const submitted = await submitFollowUp(textbox, usableButtonsBefore);
       if (!submitted) {
-        chrome.runtime.sendMessage({
-          type: "AI_OVERVIEW_RESULT",
-          data: {
-            markdown: "",
-            citations: [],
-            error: "follow_up_submit_failed",
-          },
-        });
+        sendResult({ markdown: "", citations: [], error: "follow_up_submit_failed" });
+        followUpInProgress = false;
         return;
       }
 
@@ -712,14 +748,7 @@
         "no_ai_overview_after_follow_up"
       );
     } catch (err) {
-      chrome.runtime.sendMessage({
-        type: "AI_OVERVIEW_RESULT",
-        data: {
-          markdown: "",
-          citations: [],
-          error: `follow_up_error: ${err.message}`,
-        },
-      });
+      sendResult({ markdown: "", citations: [], error: `follow_up_error: ${err.message}` });
       followUpInProgress = false;
     }
   }
@@ -745,33 +774,44 @@
     const textarea = document.querySelector(
       'textarea[placeholder*="Ask" i], textarea[aria-label*="Ask" i], textarea[placeholder*="follow" i]'
     );
-    if (textarea && textarea.offsetParent !== null) return textarea;
+    if (textarea && isShown(textarea)) return textarea;
 
     // Strategy 2: contenteditable div with textbox role
     const contentEditable = document.querySelector(
       'div[role="textbox"][contenteditable="true"]'
     );
-    if (contentEditable && contentEditable.offsetParent !== null)
+    if (contentEditable && isShown(contentEditable))
       return contentEditable;
 
     // Strategy 3: any visible textarea inside the AI overview area
     const container = findAIOverviewContainer();
     if (container) {
       const ta = container.querySelector("textarea");
-      if (ta && ta.offsetParent !== null) return ta;
+      if (ta && isShown(ta)) return ta;
     }
 
     // Strategy 4: labels are localized, so fall back to the last visible
     // textarea that is not the regular search box.
     const visible = [...document.querySelectorAll("textarea")].filter(
-      (ta) => ta.offsetParent !== null && ta.name !== "q"
+      (ta) => isShown(ta) && ta.name !== "q"
     );
     return visible[visible.length - 1] || null;
   }
 
+  // Offscreen-document frames are never laid out (zero viewport, no
+  // offsetParent anywhere), so visibility falls back to computed styles there.
+  function isShown(el) {
+    if (window.innerWidth > 0) return el.offsetParent !== null;
+    for (let node = el; node && node !== document.documentElement; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+    }
+    return true;
+  }
+
   function isUsableButton(btn) {
     return (
-      btn.offsetParent !== null &&
+      isShown(btn) &&
       !btn.disabled &&
       btn.getAttribute("aria-disabled") !== "true"
     );

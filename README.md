@@ -137,12 +137,15 @@ The MCP server wraps the HTTP API as 4 tools for AI agents. In default stdio mod
 
 | Tool | Params | Description |
 |---|---|---|
-| `search` | `query` | Search Google AI Overview. Returns markdown, citations, and a `thread_id` for follow-ups. |
+| `search` | `query`, `mode`, `hl`, `gl` | Search Google AI Overview. Returns markdown, citations, and a `thread_id` for follow-ups. `gl` localizes results to a country, `hl` sets the Google UI language. |
+| `search_many` | `queries`, `mode`, `hl`, `gl` | Run up to 10 independent searches in parallel, one tab each. |
 | `follow_up` | `query`, `thread_id` | Continue a conversation in an existing thread. |
 | `generate_image` | `prompt`, `save_path` | Generate an image with Google AI and optionally save it to disk. |
 | `health` | — | Check server and extension connectivity. |
 
-Threads auto-expire after 2 minutes of inactivity.
+Threads auto-expire after 2 minutes of inactivity (30 minutes with `GOOGLE_AI_SCRAPER_CLOSE_AFTER_SEARCH=1`, where the tab is closed right away and reopened from the conversation URL for a follow-up). Errors with a known cause, such as a Google CAPTCHA, come with a `hint`.
+
+In the extension options (Chrome), *Run searches in → Hidden offscreen frames* loads every search in an iframe of an offscreen document: no tabs or windows appear at all. For these frames only (requests outside any tab), a session `declarativeNetRequest` rule removes Google's `X-Frame-Options` and `Content-Security-Policy` headers so the page may be framed; follow-ups reopen the conversation URL in a new frame. The UI is localized (English, Russian) through `_locales`.
 
 ### Option A: Stdio Transport
 

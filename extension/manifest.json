@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Google AI Overview Scraper",
+  "name": "__MSG_extName__",
   "version": "2.12",
-  "description": "Google AI Overviews as clean Markdown with citations for Claude Code, Cursor & MCP clients. No API keys, 100% local.",
-  "permissions": ["tabs", "scripting", "alarms", "storage"],
+  "description": "__MSG_extDescription__",
+  "default_locale": "en",
+  "permissions": ["tabs", "scripting", "alarms", "storage", "offscreen", "declarativeNetRequestWithHostAccess"],
   "host_permissions": [
     "https://www.google.com/*",
     "http://localhost/*",
@@ -34,7 +35,8 @@
     {
       "matches": ["https://www.google.com/search*"],
       "js": ["lib/turndown.js", "content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ]
 }

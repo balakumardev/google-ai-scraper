@@ -1,11 +1,12 @@
 import asyncio
 import base64
+import re
 import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -17,6 +18,8 @@ PARKED_THREAD_TTL = 1800  # closed-tab threads stay resumable by URL this long
 EXTENSION_RECENT_POLL_THRESHOLD = 75.0  # MV3 workers can sleep between alarm wakeups
 QUERY_TIMEOUT = 110.0  # seconds — covers MV3 wake latency plus background tab timeout
 IMAGE_QUERY_TIMEOUT = 220.0  # seconds — covers MV3 wake latency plus image generation
+PENDING_MAX_WAIT = 20.0  # long-poll cap, below the MV3 30 s idle limit
+LOCALE_CODE = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?")
 
 
 class Thread:
@@ -31,15 +34,25 @@ class Thread:
 
 
 class PendingQuery:
-    __slots__ = ("query_id", "query", "event", "result", "thread_id", "query_type", "mode", "authuser")
+    __slots__ = ("query_id", "query", "event", "result", "thread_id", "query_type", "mode", "authuser", "hl", "gl")
 
-    def __init__(self, query: str, thread_id: str | None = None, mode: str = "pro", authuser: int | None = None):
+    def __init__(
+        self,
+        query: str,
+        thread_id: str | None = None,
+        mode: str = "pro",
+        authuser: int | None = None,
+        hl: str | None = None,
+        gl: str | None = None,
+    ):
         self.query_id: str = uuid.uuid4().hex[:12]
         self.query: str = query
         self.event: asyncio.Event = asyncio.Event()
         self.result: dict | None = None
         self.mode: str = mode
         self.authuser: int | None = authuser
+        self.hl: str | None = hl
+        self.gl: str | None = gl
         if thread_id:
             self.thread_id = thread_id
             self.query_type = "follow_up"
@@ -64,6 +77,7 @@ query_queue: deque[PendingQuery] = deque()
 active_threads: dict[str, Thread] = {}
 close_queue: deque[str] = deque()  # thread IDs for extension to close
 last_poll_time: float = 0.0
+work_available = asyncio.Event()  # wakes long-polling /pending
 
 # Shared state — image pipeline
 pending_image_queries: dict[str, PendingImageQuery] = {}
@@ -83,6 +97,8 @@ async def _cleanup_expired_threads():
         for tid in expired:
             active_threads.pop(tid, None)
             close_queue.append(tid)
+        if expired:
+            work_available.set()
 
 
 @asynccontextmanager
@@ -171,9 +187,20 @@ async def health():
 
 
 @app.get("/ask")
-async def ask(q: str, thread_id: str | None = None, close_thread: bool = False, mode: str = "pro", authuser: int | None = None):
+async def ask(
+    q: str,
+    thread_id: str | None = None,
+    close_thread: bool = False,
+    mode: str = "pro",
+    authuser: int | None = None,
+    hl: str | None = None,
+    gl: str | None = None,
+):
     if not q.strip():
         raise HTTPException(400, "query is required")
+    for name, value in (("hl", hl), ("gl", gl)):
+        if value is not None and not LOCALE_CODE.fullmatch(value):
+            raise HTTPException(400, f"{name} must be a language/region code such as 'en', 'ru' or 'pt-BR'")
     if mode not in ("fast", "pro"):
         raise HTTPException(400, "mode must be 'fast' or 'pro'")
 
@@ -189,7 +216,7 @@ async def ask(q: str, thread_id: str | None = None, close_thread: bool = False, 
     else:
         thread = None
 
-    pq = PendingQuery(q.strip(), thread_id, mode=mode, authuser=authuser)
+    pq = PendingQuery(q.strip(), thread_id, mode=mode, authuser=authuser, hl=hl, gl=gl)
 
     # Create new thread if this is a new query
     if not thread_id:
@@ -199,6 +226,7 @@ async def ask(q: str, thread_id: str | None = None, close_thread: bool = False, 
 
     pending_queries[pq.query_id] = pq
     query_queue.append(pq)
+    work_available.set()
 
     try:
         await asyncio.wait_for(pq.event.wait(), timeout=QUERY_TIMEOUT)
@@ -219,6 +247,7 @@ async def ask(q: str, thread_id: str | None = None, close_thread: bool = False, 
             else:
                 active_threads.pop(pq.thread_id, None)
             close_queue.append(pq.thread_id)
+            work_available.set()
 
     return {
         "query": pq.query,
@@ -229,8 +258,25 @@ async def ask(q: str, thread_id: str | None = None, close_thread: bool = False, 
 
 
 @app.get("/pending")
-async def get_pending():
+async def get_pending(request: Request, wait: float = 0):
     global last_poll_time
+    last_poll_time = time.monotonic()
+
+    # Long-poll: hold the request until there is work or `wait` runs out.
+    # A worker the browser suspended mid-poll has dropped the connection, so
+    # nothing is handed to it.
+    deadline = last_poll_time + min(max(wait, 0.0), PENDING_MAX_WAIT)
+    while True:
+        work_available.clear()
+        if query_queue or image_queue or close_queue:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or await request.is_disconnected():
+            break
+        try:
+            await asyncio.wait_for(work_available.wait(), timeout=min(remaining, 1.0))
+        except asyncio.TimeoutError:
+            pass
     last_poll_time = time.monotonic()
 
     # Drain close_queue
@@ -249,6 +295,8 @@ async def get_pending():
             "pipeline": "text",
             "mode": pq.mode,
             "authuser": pq.authuser,
+            "hl": pq.hl,
+            "gl": pq.gl,
             "close_threads": threads_to_close,
         }
 
@@ -291,6 +339,7 @@ async def generate_image(prompt: str):
     iq = PendingImageQuery(prompt.strip())
     pending_image_queries[iq.query_id] = iq
     image_queue.append(iq)
+    work_available.set()
 
     try:
         await asyncio.wait_for(iq.event.wait(), timeout=IMAGE_QUERY_TIMEOUT)
@@ -341,4 +390,5 @@ async def delete_thread(thread_id: str):
     if not thread:
         raise HTTPException(404, "thread not found or expired")
     close_queue.append(thread_id)
+    work_available.set()
     return {"status": "ok"}

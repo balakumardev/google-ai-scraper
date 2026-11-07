@@ -10,7 +10,7 @@ MCP Client (Claude Code, Cursor, etc.)
 MCP Server (server/google_ai_scraper/mcp_server/server.py)
     ↕ httpx (shared FastAPI backend on port 15551)
 FastAPI Server (server/google_ai_scraper/app.py)
-    ↕ polling (1.5s)
+    ↕ long-polling (GET /pending?wait=20)
 Browser Extension Background Worker
     → creates background tab (active: false)
     → content script scrapes AI Overview
@@ -71,7 +71,7 @@ tests/                     # node tests (background restart persistence)
 
 ### background.js
 - Server URL configurable via options page (default `http://localhost:15551`), cached in memory, refreshed on `chrome.storage.onChanged`
-- Polls `GET /pending` every 1.5s (recursive setTimeout keeps service worker alive)
+- Long-polls `GET /pending?wait=20` back to back: the server answers as soon as there is work (falls back to a 1.5s interval against a server that answers instantly)
 - Creates tabs with `chrome.tabs.create({url, active: false})`
 - Tracks active tabs in `Map<tabId, {queryId, threadId, timeoutId}>`
 - Tracks thread-to-tab mapping in `Map<threadId, tabId>` (threadTabs)
@@ -154,7 +154,8 @@ The MCP server (`server/google_ai_scraper/mcp_server/server.py`) wraps the FastA
 
 | Tool | Params | Description |
 |---|---|---|
-| `search` | `query: str` | Search Google AI Overview. Returns markdown + citations + thread_id. Threads auto-expire after 2 min. |
+| `search` | `query: str, mode, hl, gl` | Search Google AI Overview. Returns markdown + citations + thread_id. Threads auto-expire after 2 min. |
+| `search_many` | `queries: list[str], mode, hl, gl` | Up to 10 searches in parallel (5 at a time), results in query order. |
 | `follow_up` | `query: str, thread_id: str` | Continue a conversation in an existing thread. |
 | `health` | none | Check server, extension connectivity, queue depth. |
 
@@ -348,7 +349,7 @@ evaluate_script → verify TurndownService is available (if extension loaded)
 **6. Monitor server-extension communication:**
 ```bash
 # Watch server logs for polling activity:
-# GET /pending (every 1.5s from extension)
+# GET /pending?wait=20 (held by the server until there is work, then renewed)
 # GET /ask (from your curl)
 # POST /result/{id} (from extension after scrape)
 ```

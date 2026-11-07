@@ -19,7 +19,7 @@ function makeCtx() {
   const chrome = {
     storage: { session: mk(sessionStore), local: mk(localStore), sync: mk({}), onChanged: { addListener() {} } },
     alarms: { create: async () => {}, clear: async () => {}, onAlarm: { addListener() {} } },
-    tabs: { create: async () => ({ id: nextTab++ }), remove: async () => {}, onRemoved: ev("removed"), get: async () => ({}), query: async () => [], sendMessage: async () => ({}) },
+    tabs: { create: async () => ({ id: nextTab++ }), remove: async () => {}, onRemoved: ev("removed"), onUpdated: { addListener() {} }, get: async () => ({}), query: async () => [], sendMessage: async () => ({}) },
     runtime: { onMessage: ev("message"), lastError: null, getManifest: () => ({}), onInstalled: { addListener() {} }, onStartup: { addListener() {} } },
     scripting: { executeScript: async () => [] },
   };
@@ -27,7 +27,7 @@ function makeCtx() {
     if (String(url).includes("/image_result/")) posted.push({ url: String(url), body: JSON.parse(opts.body) });
     return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
   };
-  const ctx = vm.createContext({ chrome, fetch, console: { log() {}, warn() {}, error() {} }, setTimeout, clearTimeout, setInterval, clearInterval, URL, URLSearchParams, Intl, Date, Promise, JSON, Math, AbortController, TextEncoder, TextDecoder });
+  const ctx = vm.createContext({ chrome, fetch, console: { log() {}, warn() {}, error() {} }, setTimeout, clearTimeout, setInterval, clearInterval, URL, URLSearchParams, Intl, Date, Promise, JSON, Math, AbortController, AbortSignal, TextEncoder, TextDecoder });
   vm.runInContext(code, ctx, { filename: file });
   return { ctx, listeners };
 }
