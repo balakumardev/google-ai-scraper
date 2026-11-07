@@ -268,9 +268,54 @@
   // The answer DOM carries hidden UI text (copy toasts, share dialog, feedback
   // form); computed style is only available on the live tree, so hidden
   // elements are tagged there and dropped from the clone.
+  // Google draws formulas as an aria-hidden SVG of positioned glyphs: a raised
+  // glyph (negative translate y) is a superscript, a lowered one a subscript.
+  function mathSvgToText(svg) {
+    let out = "";
+    let level = 0;
+    let run = "";
+    const flush = () => {
+      if (!run) return;
+      if (level === 0) out += run;
+      else out += (level < 0 ? "^" : "_") + (/^[\p{L}\p{N}]+$/u.test(run.normalize("NFKC")) ? run : `(${run})`);
+      run = "";
+    };
+    for (const glyph of svg.querySelectorAll("text")) {
+      const shift = /translate\(\s*[-\d.]+\s*,\s*([-\d.]+)/.exec(glyph.getAttribute("transform") || "");
+      const y = shift ? parseFloat(shift[1]) : 0;
+      const glyphLevel = y < -0.1 ? -1 : y > 0.1 ? 1 : 0;
+      if (glyphLevel !== level) {
+        flush();
+        level = glyphLevel;
+      }
+      run += glyph.textContent;
+    }
+    flush();
+    return out.normalize("NFKC");
+  }
+
+  function mathHolderText(holder) {
+    const svg = holder.querySelector("svg");
+    if (svg && svg.querySelector("text")) return mathSvgToText(svg);
+    const math = holder.querySelector("math");
+    if (!math) return "";
+    const copy = math.cloneNode(true);
+    copy.querySelectorAll("annotation, annotation-xml").forEach((el) => el.remove());
+    return copy.textContent.normalize("NFKC");
+  }
+
   function cloneVisible(root) {
+    // A formula can be split into nested holders; only the innermost ones carry
+    // the drawing, outer ones are plain layout.
+    const holders = [...root.querySelectorAll("[data-xpm-math-type]")].filter(
+      (holder) => !holder.querySelector("[data-xpm-math-type]")
+    );
+    holders.forEach((holder, i) => holder.setAttribute("data-gas-math", String(i)));
+    const mathTexts = holders.map(mathHolderText);
+
     const hidden = [];
     const visit = (el) => {
+      if (el.hasAttribute("data-gas-math")) return;
       const style = getComputedStyle(el);
       if (
         style.display === "none" ||
@@ -286,7 +331,13 @@
     hidden.forEach((el) => el.setAttribute("data-gas-hidden", ""));
     const clone = root.cloneNode(true);
     hidden.forEach((el) => el.removeAttribute("data-gas-hidden"));
+    holders.forEach((holder) => holder.removeAttribute("data-gas-math"));
     clone.querySelectorAll("[data-gas-hidden]").forEach((el) => el.remove());
+    clone.querySelectorAll("[data-gas-math]").forEach((holder) => {
+      const replacement = document.createElement("span");
+      replacement.textContent = mathTexts[Number(holder.getAttribute("data-gas-math"))];
+      holder.replaceWith(replacement);
+    });
     return clone;
   }
 
